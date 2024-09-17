@@ -583,3 +583,6 @@ test-fuzz = "5"
 tikv-jemalloc-ctl = "0.6"
 tikv-jemallocator = "0.6"
 tracy-client = "0.17.3"
+
+[patch.crates-io]
+alloy-eips = { git = "https://github.com/0x00101010/alloy", branch = "blob-devnet" }

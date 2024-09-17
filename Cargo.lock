@@ -118,7 +118,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "arbitrary",
  "c-kzg",
  "serde",
@@ -172,14 +172,13 @@ dependencies = [
 [[package]]
 name = "alloy-eips"
 version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f6c5c0a383f14519531cf58d8440e74f10b938e289f803af870be6f79223110"
+source = "git+https://github.com/0x00101010/alloy?branch=blob-devnet#8023d2d7b80ca51ad32f1aa1305e13db24fd538a"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-serde",
+ "alloy-serde 0.3.5 (git+https://github.com/0x00101010/alloy?branch=blob-devnet)",
  "arbitrary",
  "c-kzg",
  "derive_more",
@@ -195,7 +194,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7db0ddc76399bb1a4010f630767f027cafe65ab406cfee8e6040128cd65e8325"
 dependencies = [
  "alloy-primitives",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -237,7 +236,7 @@ dependencies = [
  "alloy-network-primitives",
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "alloy-signer",
  "alloy-sol-types",
  "async-trait",
@@ -254,7 +253,7 @@ checksum = "a6e66d78c049dcadd065a926a9f2d9a9b2b10981a7889449e694fac7bccd2c6f"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -412,7 +411,7 @@ checksum = "22045187a5ebf5b2af3f8b6831b66735b6556c5750ec5790aeeb45935260c1c2"
 dependencies = [
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -435,7 +434,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "578d9ccad4e8510d32cc2810d05e01a232ccd79a4a6df60d257466897b43b013"
 dependencies = [
  "alloy-primitives",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -473,7 +472,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "derive_more",
  "jsonrpsee-types",
  "jsonwebtoken",
@@ -492,7 +491,7 @@ dependencies = [
  "alloy-network-primitives",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "alloy-sol-types",
  "arbitrary",
  "cfg-if",
@@ -512,7 +511,7 @@ checksum = "1fb6b5f521b1dc2a1517b46a85b43310bb7bacbf0a2cbea6a574d591c41db31c"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
 ]
@@ -525,7 +524,7 @@ checksum = "64ca08b0ccc0861055ceb83a1db009c4c8a7f52a259e7cda7ca6ca36ec2b5ce8"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "thiserror",
@@ -539,7 +538,7 @@ checksum = "192ad94fe34c12be8ac4413ea00b1170202faa6fdebaa756b6a33555bf86d902"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -548,6 +547,17 @@ name = "alloy-serde"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b95b6f024a558593dd3b8628af03f7df2ca50e4c56839293ad0a7546e471db0"
+dependencies = [
+ "alloy-primitives",
+ "arbitrary",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "alloy-serde"
+version = "0.3.5"
+source = "git+https://github.com/0x00101010/alloy?branch=blob-devnet#8023d2d7b80ca51ad32f1aa1305e13db24fd538a"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -5106,7 +5116,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "arbitrary",
  "derive_more",
  "serde",
@@ -5138,7 +5148,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "hashbrown 0.14.5",
  "op-alloy-consensus",
  "serde",
@@ -5155,7 +5165,7 @@ dependencies = [
  "alloy-network",
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "op-alloy-consensus",
  "serde",
  "serde_json",
@@ -5169,7 +5179,7 @@ checksum = "16990a17db7109eed0692ee16443582bd363fb9cf2768af2bf92c08f56ae4f3e"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-engine",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "op-alloy-protocol",
  "serde",
 ]
@@ -8092,7 +8102,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-types",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "arbitrary",
  "assert_matches",
  "bytes",
@@ -8557,7 +8567,7 @@ dependencies = [
  "alloy-rpc-types-mev",
  "alloy-rpc-types-trace",
  "alloy-rpc-types-txpool",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "arbitrary",
  "jsonrpsee-types",
  "op-alloy-rpc-types",
@@ -9956,7 +9966,7 @@ dependencies = [
  "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
- "alloy-serde",
+ "alloy-serde 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "alloy-sol-types",
  "anyhow",
  "serde",
