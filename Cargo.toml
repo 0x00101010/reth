@@ -585,4 +585,6 @@ tikv-jemallocator = "0.6"
 tracy-client = "0.17.3"
 
 [patch.crates-io]
-alloy-eips = { git = "https://github.com/0x00101010/alloy", branch = "blob-devnet" }
+alloy-eips = { git = "https://github.com/0x00101010/alloy", branch = "blob-devnet-56" }
+revm = { git = "https://github.com/0x00101010/revm", branch = "blob-devnet-56" }
+revm-primitives = { git = "https://github.com/0x00101010/revm", branch = "blob-devnet-56" }
