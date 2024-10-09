@@ -34,7 +34,7 @@ use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use reth_tasks::pool::BlockingTaskGuard;
 use reth_trie::{HashedPostState, HashedStorage};
 use revm::{
-    db::CacheDB,
+    db::{CacheDB, State},
     primitives::{db::DatabaseCommit, BlockEnv, CfgEnvWithHandlerCfg, Env, EnvWithHandlerCfg},
 };
 use revm_inspectors::tracing::{
@@ -614,12 +614,19 @@ where
                 let _ = block_executor
                     .execute_with_state_witness(
                         (&block.clone().unseal(), block.difficulty).into(),
-                        |statedb| {
+                        |statedb: &State<_>| {
                             codes = statedb
                                 .cache
                                 .contracts
                                 .iter()
                                 .map(|(hash, code)| (*hash, code.original_bytes()))
+                                .chain(
+                                    statedb
+                                        .bundle_state
+                                        .contracts
+                                        .iter()
+                                        .map(|(hash, code)| (*hash, code.original_bytes())),
+                                )
                                 .collect();
 
                             for (address, account) in &statedb.cache.accounts {
