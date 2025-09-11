@@ -6,7 +6,8 @@ use reth_db_api::{
     tables,
     transaction::{DbTx, DbTxMut},
 };
-use reth_primitives_traits::{GotExpected, SealedHeader};
+use reth_exex::ExExManagerHandle;
+use reth_primitives_traits::{GotExpected, NodePrimitives, SealedHeader};
 use reth_provider::{
     DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
     StatsReader, TrieWriter,
@@ -70,7 +71,10 @@ pub const MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD: u64 = 7_000;
 /// - [`StorageHashingStage`][crate::stages::StorageHashingStage]
 /// - [`MerkleStage::Execution`]
 #[derive(Debug, Clone)]
-pub enum MerkleStage {
+pub enum MerkleStage<P>
+where
+    P: NodePrimitives,
+{
     /// The execution portion of the merkle stage.
     Execution {
         // TODO: make struct for holding incremental settings, for code reuse between `Execution`
@@ -82,6 +86,8 @@ pub enum MerkleStage {
         /// incremental mode will calculate the state root by calculating the new state root for
         /// some number of blocks, repeating until we reach the desired block number.
         incremental_threshold: u64,
+        /// Handle to communicate with `ExEx` manager.
+        exex_manager_handle: ExExManagerHandle<P>,
     },
     /// The unwind portion of the merkle stage.
     Unwind,
@@ -98,12 +104,16 @@ pub enum MerkleStage {
     },
 }
 
-impl MerkleStage {
+impl<P> MerkleStage<P>
+where
+    P: NodePrimitives,
+{
     /// Stage default for the [`MerkleStage::Execution`].
-    pub const fn default_execution() -> Self {
+    pub fn default_execution() -> Self {
         Self::Execution {
             rebuild_threshold: MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
             incremental_threshold: MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD,
+            exex_manager_handle: ExExManagerHandle::empty(),
         }
     }
 
@@ -113,8 +123,12 @@ impl MerkleStage {
     }
 
     /// Create new instance of [`MerkleStage::Execution`].
-    pub const fn new_execution(rebuild_threshold: u64, incremental_threshold: u64) -> Self {
-        Self::Execution { rebuild_threshold, incremental_threshold }
+    pub const fn new_execution(
+        rebuild_threshold: u64,
+        incremental_threshold: u64,
+        exex_manager_handle: ExExManagerHandle<P>,
+    ) -> Self {
+        Self::Execution { rebuild_threshold, incremental_threshold, exex_manager_handle }
     }
 
     /// Gets the hashing progress
@@ -152,8 +166,9 @@ impl MerkleStage {
     }
 }
 
-impl<Provider> Stage<Provider> for MerkleStage
+impl<Provider, P> Stage<Provider> for MerkleStage<P>
 where
+    P: NodePrimitives,
     Provider: DBProvider<Tx: DbTxMut>
         + TrieWriter
         + StatsReader
@@ -178,7 +193,7 @@ where
                 info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
                 return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
             }
-            Self::Execution { rebuild_threshold, incremental_threshold } => {
+            Self::Execution { rebuild_threshold, incremental_threshold, .. } => {
                 (*rebuild_threshold, *incremental_threshold)
             }
             #[cfg(any(test, feature = "test-utils"))]
@@ -231,8 +246,8 @@ where
             }
             .unwrap_or(EntitiesCheckpoint {
                 processed: 0,
-                total: (provider.count_entries::<tables::HashedAccounts>()? +
-                    provider.count_entries::<tables::HashedStorages>()?)
+                total: (provider.count_entries::<tables::HashedAccounts>()?
+                    + provider.count_entries::<tables::HashedStorages>()?)
                     as u64,
             });
 
@@ -325,8 +340,8 @@ where
                 "Incremental merkle hashing did not produce a final root".into(),
             ))?;
 
-            let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
-                provider.count_entries::<tables::HashedStorages>()?)
+            let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()?
+                + provider.count_entries::<tables::HashedStorages>()?)
                 as u64;
 
             let entities_checkpoint = EntitiesCheckpoint {
@@ -368,8 +383,8 @@ where
         let mut entities_checkpoint =
             input.checkpoint.entities_stage_checkpoint().unwrap_or(EntitiesCheckpoint {
                 processed: 0,
-                total: (tx.entries::<tables::HashedAccounts>()? +
-                    tx.entries::<tables::HashedStorages>()?) as u64,
+                total: (tx.entries::<tables::HashedAccounts>()?
+                    + tx.entries::<tables::HashedStorages>()?) as u64,
             });
 
         if input.unwind_to == 0 {
@@ -438,6 +453,7 @@ mod tests {
     use alloy_primitives::{keccak256, U256};
     use assert_matches::assert_matches;
     use reth_db_api::cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO};
+    use reth_ethereum_primitives::EthPrimitives;
     use reth_primitives_traits::{SealedBlock, StorageEntry};
     use reth_provider::{providers::StaticFileWriter, StaticFileProviderFactory};
     use reth_stages_api::StageUnitCheckpoint;
@@ -609,7 +625,7 @@ mod tests {
     }
 
     impl StageTestRunner for MerkleTestRunner {
-        type S = MerkleStage;
+        type S = MerkleStage<EthPrimitives>;
 
         fn db(&self) -> &TestStageDB {
             &self.db

@@ -49,6 +49,7 @@ use alloy_primitives::B256;
 use reth_config::config::StageConfig;
 use reth_consensus::{ConsensusError, FullConsensus};
 use reth_evm::ConfigureEvm;
+use reth_exex::ExExManagerHandle;
 use reth_network_p2p::{bodies::downloader::BodyDownloader, headers::downloader::HeaderDownloader};
 use reth_primitives_traits::{Block, NodePrimitives};
 use reth_provider::HeaderSyncGapProvider;
@@ -320,7 +321,7 @@ where
     E: ConfigureEvm,
     ExecutionStages<E>: StageSet<Provider>,
     PruneSenderRecoveryStage: Stage<Provider>,
-    HashingStages: StageSet<Provider>,
+    HashingStages<E::Primitives>: StageSet<Provider>,
     HistoryIndexingStages: StageSet<Provider>,
     PruneStage: Stage<Provider>,
 {
@@ -331,7 +332,7 @@ where
             .add_stage_opt(self.prune_modes.sender_recovery.map(|prune_mode| {
                 PruneSenderRecoveryStage::new(prune_mode, self.stages_config.prune.commit_threshold)
             }))
-            .add_set(HashingStages { stages_config: self.stages_config.clone() })
+            .add_set(HashingStages::default_with_config(self.stages_config.clone()))
             .add_set(HistoryIndexingStages {
                 stages_config: self.stages_config.clone(),
                 prune_modes: self.prune_modes.clone(),
@@ -387,16 +388,34 @@ where
 }
 
 /// A set containing all stages that hash account state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 #[non_exhaustive]
-pub struct HashingStages {
+pub struct HashingStages<P: NodePrimitives> {
     /// Configuration for each stage in the pipeline
     stages_config: StageConfig,
+    /// ExEx manager handle for communication with ExEx.
+    exex_manager_handle: ExExManagerHandle<P>,
 }
 
-impl<Provider> StageSet<Provider> for HashingStages
+impl<P: NodePrimitives> HashingStages<P> {
+    /// Create a new set of hashing stages with default configuration.
+    pub const fn new(
+        stages_config: StageConfig,
+        exex_manager_handle: ExExManagerHandle<P>,
+    ) -> Self {
+        Self { stages_config, exex_manager_handle }
+    }
+
+    /// Create a new set of hashing stages with default configuration and empty ExEx manager.
+    pub fn default_with_config(stages_config: StageConfig) -> Self {
+        Self { stages_config, exex_manager_handle: ExExManagerHandle::empty() }
+    }
+}
+
+impl<P, Provider> StageSet<Provider> for HashingStages<P>
 where
-    MerkleStage: Stage<Provider>,
+    P: NodePrimitives,
+    MerkleStage<P>: Stage<Provider>,
     AccountHashingStage: Stage<Provider>,
     StorageHashingStage: Stage<Provider>,
 {
@@ -414,6 +433,7 @@ where
             .add_stage(MerkleStage::new_execution(
                 self.stages_config.merkle.rebuild_threshold,
                 self.stages_config.merkle.incremental_threshold,
+                self.exex_manager_handle,
             ))
     }
 }
