@@ -137,7 +137,7 @@ impl ProofSequencer {
 
         // return early if we don't have the next expected proof
         if !self.pending_proofs.contains_key(&self.next_to_deliver) {
-            return Vec::new()
+            return Vec::new();
         }
 
         let mut consecutive_proofs = Vec::with_capacity(self.pending_proofs.len());
@@ -368,7 +368,7 @@ impl MultiproofManager {
                 "No proof targets, sending empty multiproof back immediately"
             );
             input.send_empty_proof();
-            return
+            return;
         }
 
         match input {
@@ -778,8 +778,8 @@ impl MultiProofTask {
 
         // Only chunk if account or storage workers are available to take advantage of parallelism.
         let should_chunk =
-            self.multiproof_manager.proof_worker_handle.has_available_account_workers() ||
-                self.multiproof_manager.proof_worker_handle.has_available_storage_workers();
+            self.multiproof_manager.proof_worker_handle.has_available_account_workers()
+                || self.multiproof_manager.proof_worker_handle.has_available_storage_workers();
 
         let mut dispatch = |proof_targets| {
             self.multiproof_manager.dispatch(
@@ -811,8 +811,8 @@ impl MultiProofTask {
 
     // Returns true if all state updates finished and all proofs processed.
     fn is_done(&self) -> bool {
-        let all_proofs_processed =
-            self.proofs_processed >= self.state_update_proofs_requested + self.prefetch_proofs_requested;
+        let all_proofs_processed = self.proofs_processed
+            >= self.state_update_proofs_requested + self.prefetch_proofs_requested;
         let no_pending = !self.proof_sequencer.has_pending();
         trace!(
             target: "engine::tree::payload_processor::multiproof",
@@ -856,7 +856,7 @@ impl MultiProofTask {
             let Some(fetched_storage) = self.fetched_proof_targets.get(hashed_address) else {
                 // this means the account has not been fetched yet, so we must fetch everything
                 // associated with this account
-                continue
+                continue;
             };
 
             let prev_target_storage_len = target_storage.len();
@@ -912,8 +912,8 @@ impl MultiProofTask {
 
         // Only chunk if account or storage workers are available to take advantage of parallelism.
         let should_chunk =
-            self.multiproof_manager.proof_worker_handle.has_available_account_workers() ||
-                self.multiproof_manager.proof_worker_handle.has_available_storage_workers();
+            self.multiproof_manager.proof_worker_handle.has_available_account_workers()
+                || self.multiproof_manager.proof_worker_handle.has_available_storage_workers();
 
         let mut dispatch = |hashed_state_update| {
             let proof_targets = get_proof_targets(
@@ -1030,12 +1030,51 @@ impl MultiProofTask {
             crossbeam_channel::select! {
                 recv(self.rx) -> message => {
                     match message {
-                        Ok(msg) => match msg {
-                            MultiProofMessage::PrefetchProofs(targets) => {
-                                trace!(target: "engine::tree::payload_processor::multiproof", "processing MultiProofMessage::PrefetchProofs");
+                        Ok(first_msg) => {
+                            // Drain all immediately available messages for batch processing
+                            let mut messages = vec![first_msg];
+                            while let Ok(msg) = self.rx.try_recv() {
+                                messages.push(msg);
+                            }
+
+                            trace!(
+                                target: "engine::tree::payload_processor::multiproof",
+                                batch_size = messages.len(),
+                                "Draining message batch from control channel"
+                            );
+
+                            // Separate messages by type for batched processing
+                            let mut prefetch_targets_batch = Vec::new();
+                            let mut state_updates = Vec::new();
+                            let mut empty_proofs = Vec::new();
+                            let mut finished = false;
+
+                            for msg in messages {
+                                match msg {
+                                    MultiProofMessage::PrefetchProofs(targets) => {
+                                        prefetch_targets_batch.push(targets);
+                                    }
+                                    MultiProofMessage::StateUpdate(source, update) => {
+                                        state_updates.push((source, update));
+                                    }
+                                    MultiProofMessage::EmptyProof { sequence_number, state } => {
+                                        empty_proofs.push((sequence_number, state));
+                                    }
+                                    MultiProofMessage::FinishedStateUpdates => {
+                                        finished = true;
+                                    }
+                                }
+                            }
+
+                            // 1. Batch process PrefetchProofs - merge all targets into one
+                            if !prefetch_targets_batch.is_empty() {
+                                trace!(
+                                    target: "engine::tree::payload_processor::multiproof",
+                                    count = prefetch_targets_batch.len(),
+                                    "processing batched PrefetchProofs"
+                                );
 
                                 if first_update_time.is_none() {
-                                    // record the wait time
                                     self.metrics
                                         .first_update_wait_time_histogram
                                         .record(start.elapsed().as_secs_f64());
@@ -1043,73 +1082,104 @@ impl MultiProofTask {
                                     debug!(target: "engine::tree::payload_processor::multiproof", "Started state root calculation");
                                 }
 
-                                let account_targets = targets.len();
-                                let storage_targets =
-                                    targets.values().map(|slots| slots.len()).sum::<usize>();
-                                self.prefetch_proofs_requested += self.on_prefetch_proof(targets);
+                                // Merge all prefetch targets into one
+                                let mut merged_targets = MultiProofTargets::default();
+                                for targets in prefetch_targets_batch {
+                                    merged_targets.extend(targets);
+                                }
+
+                                let account_targets = merged_targets.len();
+                                let storage_targets = merged_targets.values().map(|slots| slots.len()).sum::<usize>();
+                                self.prefetch_proofs_requested += self.on_prefetch_proof(merged_targets);
                                 debug!(
                                     target: "engine::tree::payload_processor::multiproof",
                                     account_targets,
                                     storage_targets,
                                     prefetch_proofs_requested = self.prefetch_proofs_requested,
-                                    "Prefetching proofs"
+                                    "Prefetching proofs (batched)"
                                 );
                             }
-                            MultiProofMessage::StateUpdate(source, update) => {
-                                trace!(target: "engine::tree::payload_processor::multiproof", "processing MultiProofMessage::StateUpdate");
 
-                                if first_update_time.is_none() {
-                                    // record the wait time
-                                    self.metrics
-                                        .first_update_wait_time_histogram
-                                        .record(start.elapsed().as_secs_f64());
-                                    first_update_time = Some(Instant::now());
-                                    debug!(target: "engine::tree::payload_processor::multiproof", "Started state root calculation");
-                                }
-
-                                let len = update.len();
-                                self.state_update_proofs_requested += self.on_state_update(source, update);
-                                debug!(
+                            // 2. Process StateUpdates individually in order
+                            // Cannot be merged - each transaction needs its own sequence number
+                            if !state_updates.is_empty() {
+                                trace!(
                                     target: "engine::tree::payload_processor::multiproof",
-                                    ?source,
-                                    len,
-                                    state_update_proofs_requested = self.state_update_proofs_requested,
-                                    "Received new state update"
+                                    count = state_updates.len(),
+                                    "processing batched StateUpdates"
                                 );
-                            }
-                            MultiProofMessage::FinishedStateUpdates => {
-                                trace!(target: "engine::tree::payload_processor::multiproof", "processing MultiProofMessage::FinishedStateUpdates");
 
-                                self.updates_finished = true;
-                                updates_finished_time = Some(Instant::now());
+                                for (source, update) in state_updates {
+                                    if first_update_time.is_none() {
+                                        self.metrics
+                                            .first_update_wait_time_histogram
+                                            .record(start.elapsed().as_secs_f64());
+                                        first_update_time = Some(Instant::now());
+                                        debug!(target: "engine::tree::payload_processor::multiproof", "Started state root calculation");
+                                    }
 
-                                if self.is_done() {
+                                    let len = update.len();
+                                    self.state_update_proofs_requested += self.on_state_update(source, update);
                                     debug!(
                                         target: "engine::tree::payload_processor::multiproof",
-                                        "State updates finished and all proofs processed, ending calculation"
+                                        ?source,
+                                        len,
+                                        state_update_proofs_requested = self.state_update_proofs_requested,
+                                        "Received new state update"
                                     );
-                                    break
                                 }
                             }
-                            MultiProofMessage::EmptyProof { sequence_number, state } => {
-                                trace!(target: "engine::tree::payload_processor::multiproof", "processing MultiProofMessage::EmptyProof");
 
-                                self.proofs_processed += 1;
+                            // 3. Batch process EmptyProofs through ProofSequencer
+                            if !empty_proofs.is_empty() {
+                                trace!(
+                                    target: "engine::tree::payload_processor::multiproof",
+                                    count = empty_proofs.len(),
+                                    "processing batched EmptyProofs"
+                                );
 
-                                if let Some(combined_update) = self.on_proof(
-                                    sequence_number,
-                                    SparseTrieUpdate { state, multiproof: Default::default() },
-                                ) {
+                                let mut batch_ready_updates = Vec::new();
+
+                                for (sequence_number, state) in empty_proofs {
+                                    self.proofs_processed += 1;
+
+                                    // ProofSequencer buffers out-of-order proofs and returns
+                                    // contiguous sequences when ready
+                                    let ready_updates = self.proof_sequencer.add_proof(
+                                        sequence_number,
+                                        SparseTrieUpdate { state, multiproof: Default::default() }
+                                    );
+
+                                    batch_ready_updates.extend(ready_updates);
+                                }
+
+                                // Merge all ready updates and send once to sparse trie
+                                if let Some(combined_update) = batch_ready_updates
+                                    .into_iter()
+                                    .reduce(|mut acc, update| {
+                                        acc.extend(update);
+                                        acc
+                                    })
+                                    .filter(|update| !update.is_empty())
+                                {
                                     let _ = self.to_sparse_trie.send(combined_update);
                                 }
+                            }
 
-                                if self.is_done() {
-                                    debug!(
-                                        target: "engine::tree::payload_processor::multiproof",
-                                        "State updates finished and all proofs processed, ending calculation"
-                                    );
-                                    break
-                                }
+                            // 4. Handle FinishedStateUpdates
+                            if finished {
+                                trace!(target: "engine::tree::payload_processor::multiproof", "processing FinishedStateUpdates");
+                                self.updates_finished = true;
+                                updates_finished_time = Some(Instant::now());
+                            }
+
+                            // 5. Check exit condition once after processing entire batch
+                            if self.is_done() {
+                                debug!(
+                                    target: "engine::tree::payload_processor::multiproof",
+                                    "State updates finished and all proofs processed, ending calculation"
+                                );
+                                break
                             }
                         },
                         Err(_) => {
@@ -1183,7 +1253,9 @@ impl MultiProofTask {
         );
 
         // update total metrics on finish
-        self.metrics.state_updates_received_histogram.record(self.state_update_proofs_requested as f64);
+        self.metrics
+            .state_updates_received_histogram
+            .record(self.state_update_proofs_requested as f64);
         self.metrics.proofs_processed_histogram.record(self.proofs_processed as f64);
         if let Some(total_time) = first_update_time.map(|t| t.elapsed()) {
             self.metrics.multiproof_task_total_duration_histogram.record(total_time);
@@ -1222,8 +1294,8 @@ fn get_proof_targets(
             .storage
             .keys()
             .filter(|slot| {
-                !fetched.is_some_and(|f| f.contains(*slot)) ||
-                    storage_added_removed_keys.is_some_and(|k| k.is_removed(slot))
+                !fetched.is_some_and(|f| f.contains(*slot))
+                    || storage_added_removed_keys.is_some_and(|k| k.is_removed(slot))
             })
             .peekable();
 
