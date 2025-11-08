@@ -1,13 +1,14 @@
 use crate::{
     sequence::FlashBlockPendingSequence,
     worker::{BuildArgs, FlashBlockBuilder},
-    ExecutionPayloadBaseV1, FlashBlock, FlashBlockCompleteSequence, FlashBlockCompleteSequenceRx,
-    InProgressFlashBlockRx, PendingFlashBlock,
+    FlashBlock, FlashBlockCompleteSequence, FlashBlockCompleteSequenceRx, InProgressFlashBlockRx,
+    PendingFlashBlock,
 };
 use alloy_eips::eip2718::WithEncoded;
 use alloy_primitives::B256;
 use futures_util::{FutureExt, Stream, StreamExt};
 use metrics::Histogram;
+use op_alloy_rpc_types_engine::flashblock::OpFlashblockExecutionPayloadBase;
 use reth_chain_state::{CanonStateNotification, CanonStateNotifications, CanonStateSubscriptions};
 use reth_evm::ConfigureEvm;
 use reth_metrics::Metrics;
@@ -37,7 +38,10 @@ pub(crate) const FB_STATE_ROOT_FROM_INDEX: usize = 9;
 pub struct FlashBlockService<
     N: NodePrimitives,
     S,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: Unpin>,
+    EvmConfig: ConfigureEvm<
+        Primitives = N,
+        NextBlockEnvCtx: TryFrom<OpFlashblockExecutionPayloadBase> + Unpin,
+    >,
     Provider,
 > {
     rx: S,
@@ -67,8 +71,10 @@ impl<N, S, EvmConfig, Provider> FlashBlockService<N, S, EvmConfig, Provider>
 where
     N: NodePrimitives,
     S: Stream<Item = eyre::Result<FlashBlock>> + Unpin + 'static,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<ExecutionPayloadBaseV1> + Unpin>
-        + Clone
+    EvmConfig: ConfigureEvm<
+            Primitives = N,
+            NextBlockEnvCtx: TryFrom<OpFlashblockExecutionPayloadBase> + Unpin,
+        > + Clone
         + 'static,
     Provider: StateProviderFactory
         + CanonStateSubscriptions<Primitives = N>
@@ -191,11 +197,11 @@ where
             self.compute_state_root && self.blocks.index() >= Some(FB_STATE_ROOT_FROM_INDEX as u64);
 
         Some(BuildArgs {
-            base,
+            base: base.into(),
             transactions: self.blocks.ready_transactions().collect::<Vec<_>>(),
             cached_state: self.cached_state.take(),
-            last_flashblock_index: last_flashblock.index,
-            last_flashblock_hash: last_flashblock.diff.block_hash,
+            last_flashblock_index: last_flashblock.index(),
+            last_flashblock_hash: last_flashblock.block_hash(),
             compute_state_root,
         })
     }
@@ -228,8 +234,10 @@ impl<N, S, EvmConfig, Provider> Stream for FlashBlockService<N, S, EvmConfig, Pr
 where
     N: NodePrimitives,
     S: Stream<Item = eyre::Result<FlashBlock>> + Unpin + 'static,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<ExecutionPayloadBaseV1> + Unpin>
-        + Clone
+    EvmConfig: ConfigureEvm<
+            Primitives = N,
+            NextBlockEnvCtx: TryFrom<OpFlashblockExecutionPayloadBase> + Unpin,
+        > + Clone
         + 'static,
     Provider: StateProviderFactory
         + CanonStateSubscriptions<Primitives = N>
@@ -300,7 +308,7 @@ where
                 match result {
                     Ok(flashblock) => {
                         this.notify_received_flashblock(&flashblock);
-                        if flashblock.index == 0 {
+                        if flashblock.index() == 0 {
                             this.metrics.last_flashblock_length.record(this.blocks.count() as f64);
                         }
                         match this.blocks.insert(flashblock) {
@@ -337,9 +345,9 @@ where
                 let now = Instant::now();
 
                 let fb_info = FlashBlockBuildInfo {
-                    parent_hash: args.base.parent_hash,
+                    parent_hash: args.base.parent_hash(),
                     index: args.last_flashblock_index,
-                    block_number: args.base.block_number,
+                    block_number: args.base.block_number(),
                 };
                 // Signal that a flashblock build has started with build metadata
                 let _ = this.in_progress_tx.send(Some(fb_info));

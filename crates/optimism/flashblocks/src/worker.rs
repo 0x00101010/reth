@@ -1,6 +1,7 @@
-use crate::{ExecutionPayloadBaseV1, PendingFlashBlock};
+use crate::PendingFlashBlock;
 use alloy_eips::{eip2718::WithEncoded, BlockNumberOrTag};
 use alloy_primitives::B256;
+use op_alloy_rpc_types_engine::flashblock::OpFlashblockExecutionPayloadBase;
 use reth_chain_state::{CanonStateSubscriptions, ExecutedBlock};
 use reth_errors::RethError;
 use reth_evm::{
@@ -38,7 +39,7 @@ impl<EvmConfig, Provider> FlashBlockBuilder<EvmConfig, Provider> {
 }
 
 pub(crate) struct BuildArgs<I> {
-    pub(crate) base: ExecutionPayloadBaseV1,
+    pub(crate) base: OpFlashblockExecutionPayloadBase,
     pub(crate) transactions: I,
     pub(crate) cached_state: Option<(B256, CachedReads)>,
     pub(crate) last_flashblock_index: u64,
@@ -49,7 +50,10 @@ pub(crate) struct BuildArgs<I> {
 impl<N, EvmConfig, Provider> FlashBlockBuilder<EvmConfig, Provider>
 where
     N: NodePrimitives,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<ExecutionPayloadBaseV1> + Unpin>,
+    EvmConfig: ConfigureEvm<
+        Primitives = N,
+        NextBlockEnvCtx: TryFrom<OpFlashblockExecutionPayloadBase> + Unpin,
+    >,
     Provider: StateProviderFactory
         + CanonStateSubscriptions<Primitives = N>
         + BlockReaderIdExt<
@@ -60,7 +64,7 @@ where
         > + Unpin,
 {
     /// Returns the [`PendingFlashBlock`] made purely out of transactions and
-    /// [`ExecutionPayloadBaseV1`] in `args`.
+    /// [`OpFlashblockExecutionPayloadBase`] in `args`.
     ///
     /// Returns `None` if the flashblock doesn't attach to the latest header.
     pub(crate) fn execute<I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>>(
@@ -75,8 +79,8 @@ where
             .ok_or(EthApiError::HeaderNotFound(BlockNumberOrTag::Latest.into()))?;
         let latest_hash = latest.hash();
 
-        if args.base.parent_hash != latest_hash {
-            trace!(flashblock_parent = ?args.base.parent_hash, local_latest=?latest.num_hash(),"Skipping non consecutive flashblock");
+        if args.base.parent_hash() != latest_hash {
+            trace!(flashblock_parent = ?args.base.parent_hash(), local_latest=?latest.num_hash(),"Skipping non consecutive flashblock");
             // doesn't attach to the latest block
             return Ok(None)
         }
@@ -92,9 +96,13 @@ where
         let cached_db = request_cache.as_db_mut(StateProviderDatabase::new(&state_provider));
         let mut state = State::builder().with_database(cached_db).with_bundle_update().build();
 
+        let attributes = args
+            .base
+            .try_into()
+            .map_err(|_| eyre::eyre!("Failed to convert flashblock base to next block context"))?;
         let mut builder = self
             .evm_config
-            .builder_for_next_block(&mut state, &latest, args.base.into())
+            .builder_for_next_block(&mut state, &latest, attributes)
             .map_err(RethError::other)?;
 
         builder.apply_pre_execution_changes()?;

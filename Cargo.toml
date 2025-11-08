@@ -728,7 +728,11 @@ visibility = "0.1.1"
 walkdir = "2.3.3"
 vergen-git2 = "1.0.5"
 
-# [patch.crates-io]
+[patch.crates-io]
+op-alloy-consensus = { path = "/Users/francis/src/op-alloy/crates/consensus" }
+op-alloy-rpc-types-engine = { path = "/Users/francis/src/op-alloy/crates/rpc-types-engine" }
+# op-alloy-consensus = { git = "https://github.com/0x00101010/op-alloy", rev = "49696f9077cfb1e211d99d3b651ecf14389f2fcc" }
+# op-alloy-rpc-types-engine = { git = "https://github.com/0x00101010/op-alloy", rev = "49696f9077cfb1e211d99d3b651ecf14389f2fcc" }
 # alloy-consensus = { git = "https://github.com/alloy-rs/alloy", rev = "3049f232fbb44d1909883e154eb38ec5962f53a3" }
 # alloy-contract = { git = "https://github.com/alloy-rs/alloy", rev = "3049f232fbb44d1909883e154eb38ec5962f53a3" }
 # alloy-eips = { git = "https://github.com/alloy-rs/alloy", rev = "3049f232fbb44d1909883e154eb38ec5962f53a3" }
