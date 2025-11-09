@@ -86,7 +86,9 @@ where
             trace!(number=%flashblock.block_number(), "Tracking new flashblock sequence");
 
             // Flash block at index zero resets the whole state.
-            self.clear_and_broadcast_blocks();
+            if !self.inner.is_empty() {
+                self.clear_and_broadcast_blocks();
+            }
 
             self.inner.insert(flashblock.index(), PreparedFlashBlock::new(flashblock)?);
             return Ok(())
