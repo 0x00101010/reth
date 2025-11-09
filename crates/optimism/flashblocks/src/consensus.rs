@@ -1,5 +1,6 @@
 use crate::{FlashBlockCompleteSequence, FlashBlockCompleteSequenceRx};
 use alloy_primitives::B256;
+use alloy_rpc_types_engine::PayloadStatusEnum;
 use op_alloy_rpc_types_engine::OpExecutionData;
 use reth_engine_primitives::ConsensusEngineHandle;
 use reth_optimism_payload_builder::OpPayloadTypes;
@@ -73,7 +74,13 @@ where
                         %block_hash,
                         ?result,
                         "Successfully called engine_newPayload",
-                    )
+                    );
+
+                    match result.status {
+                        PayloadStatusEnum::Valid => {}
+                        // return early if payload validation failed.
+                        _ => continue,
+                    }
                 }
                 Err(err) => {
                     error!(
@@ -129,8 +136,9 @@ impl From<&FlashBlockCompleteSequence> for OpExecutionData {
         // option to disable state root calculation for blocks, and in that case, the payload's
         // state_root will be zero, and we'll need to locally calculate state_root before
         // proceeding to call engine_newPayload.
-        if let Some(state_root) = sequence.state_root() {
-            data.payload.as_v1_mut().state_root = state_root;
+        if let Some(executed_info) = sequence.executed_info() {
+            data.payload.as_v1_mut().state_root = executed_info.state_root;
+            data.payload.as_v1_mut().block_hash = executed_info.block_hash;
         }
         data
     }
