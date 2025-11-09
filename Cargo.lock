@@ -6124,8 +6124,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 [[package]]
 name = "op-alloy-consensus"
 version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e42e9de945efe3c2fbd207e69720c9c1af2b8caa6872aee0e216450c25a3ca70"
+source = "git+https://github.com/0x00101010/op-alloy?rev=fb623a5012d565cd5d005bdd78d9d0d000fb1390#fb623a5012d565cd5d005bdd78d9d0d000fb1390"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6196,8 +6195,7 @@ dependencies = [
 [[package]]
 name = "op-alloy-rpc-types-engine"
 version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5429622150d18d8e6847a701135082622413e2451b64d03f979415d764566bef"
+source = "git+https://github.com/0x00101010/op-alloy?rev=fb623a5012d565cd5d005bdd78d9d0d000fb1390#fb623a5012d565cd5d005bdd78d9d0d000fb1390"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -9420,28 +9418,25 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
- "alloy-serde",
  "brotli",
  "derive_more",
  "eyre",
  "futures-util",
  "metrics",
+ "op-alloy-rpc-types-engine",
  "reth-chain-state",
  "reth-engine-primitives",
  "reth-errors",
  "reth-evm",
  "reth-execution-types",
  "reth-metrics",
- "reth-optimism-evm",
  "reth-optimism-payload-builder",
- "reth-optimism-primitives",
  "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-revm",
  "reth-rpc-eth-types",
  "reth-storage-api",
  "reth-tasks",
- "ringbuffer",
  "serde",
  "serde_json",
  "test-case",
