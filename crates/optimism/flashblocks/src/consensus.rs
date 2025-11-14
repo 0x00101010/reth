@@ -265,7 +265,7 @@ impl From<&FlashBlockCompleteSequence> for OpExecutionData {
             let payload = data.payload.as_v1_mut();
             payload.state_root = execution_outcome.state_root;
             payload.block_hash = execution_outcome.block_hash;
-            trace!(
+            debug!(
                 target: "flashblocks",
                 state_root = %payload.state_root,
                 block_hash = %payload.block_hash,
