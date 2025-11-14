@@ -272,6 +272,11 @@ impl From<&FlashBlockCompleteSequence> for OpExecutionData {
                 block_number = %payload.block_number,
                 "Updating payload with execution outcome",
             )
+        } else {
+            debug!(
+                target: "flashblocks",
+                "execution_outcome is None",
+            )
         }
         data
     }
