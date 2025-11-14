@@ -217,6 +217,13 @@ where
         let expected_final_flashblock = block_time_ms / FLASHBLOCK_BLOCK_TIME;
         let compute_state_root = last_flashblock.diff.state_root.is_zero() &&
             self.blocks.index() >= Some(expected_final_flashblock.saturating_sub(1));
+        debug!(
+            target: "flashblocks",
+            block_time_ms,
+            expected_final_flashblock,
+            is_zero = last_flashblock.diff.state_root.is_zero(),
+            index = self.blocks.index(),
+        );
 
         Some(BuildArgs {
             base,
