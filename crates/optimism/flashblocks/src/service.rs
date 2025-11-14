@@ -159,29 +159,42 @@ where
         >,
     > {
         let Some(base) = self.blocks.payload_base() else {
-            trace!(
+            debug!(
                 target: "flashblocks",
                 flashblock_number = ?self.blocks.block_number(),
                 count = %self.blocks.count(),
-                "Missing flashblock payload base"
+                "Skipping build: missing flashblock payload base"
             );
 
             return None
         };
 
         let Some(latest) = self.builder.provider().latest_header().ok().flatten() else {
-            trace!(target: "flashblocks", "No latest header found");
+            debug!(target: "flashblocks", "Skipping build: no latest header found from provider");
             return None
         };
 
         // attempt an initial consecutive check
         if latest.hash() != base.parent_hash {
-            trace!(target: "flashblocks", flashblock_parent=?base.parent_hash, flashblock_number=base.block_number, local_latest=?latest.num_hash(), "Skipping non consecutive build attempt");
+            debug!(
+                target: "flashblocks",
+                flashblock_parent = %base.parent_hash,
+                flashblock_number = base.block_number,
+                local_latest_hash = %latest.hash(),
+                local_latest_number = latest.number(),
+                gap = %(base.block_number as i64 - latest.number() as i64),
+                "Skipping build: flashblock parent doesn't match local chain tip (node behind)"
+            );
             return None
         }
 
         let Some(last_flashblock) = self.blocks.last_flashblock() else {
-            trace!(target: "flashblocks", flashblock_number = ?self.blocks.block_number(), count = %self.blocks.count(), "Missing last flashblock");
+            debug!(
+                target: "flashblocks",
+                flashblock_number = ?self.blocks.block_number(),
+                count = %self.blocks.count(),
+                "Skipping build: missing last flashblock in sequence"
+            );
             return None
         };
 
