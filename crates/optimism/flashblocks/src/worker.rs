@@ -19,7 +19,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::trace;
+use tracing::*;
 
 /// The `FlashBlockBuilder` builds [`PendingBlock`] out of a sequence of transactions.
 #[derive(Debug)]
@@ -77,7 +77,7 @@ where
         let latest_hash = latest.hash();
 
         if args.base.parent_hash != latest_hash {
-            trace!(target: "flashblocks", flashblock_parent = ?args.base.parent_hash, local_latest=?latest.num_hash(),"Skipping non consecutive flashblock");
+            debug!(target: "flashblocks", flashblock_parent = ?args.base.parent_hash, local_latest=?latest.num_hash(),"Skipping non consecutive flashblock");
             // doesn't attach to the latest block
             return Ok(None)
         }
@@ -107,7 +107,7 @@ where
         // if the real state root should be computed
         let BlockBuilderOutcome { execution_result, block, hashed_state, .. } =
             if args.compute_state_root {
-                trace!(target: "flashblocks", "Computing block state root");
+                debug!(target: "flashblocks", "Computing block state root");
                 builder.finish(&state_provider)?
             } else {
                 builder.finish(NoopProvider::default())?
