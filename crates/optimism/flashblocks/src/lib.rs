@@ -29,6 +29,8 @@ pub use service::{FlashBlockBuildInfo, FlashBlockService};
 mod worker;
 
 mod ws;
+mod cache;
+
 pub use ws::{WsConnect, WsFlashBlockStream};
 
 /// Receiver of the most recent [`PendingFlashBlock`] built out of [`FlashBlock`]s.

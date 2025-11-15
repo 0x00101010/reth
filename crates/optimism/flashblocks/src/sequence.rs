@@ -7,6 +7,7 @@ use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 use std::{collections::BTreeMap, ops::Deref};
 use tokio::sync::broadcast;
 use tracing::{debug, trace, warn};
+use reth_revm::cached::CachedReads;
 
 /// The size of the broadcast channel for completed flashblock sequences.
 const FLASHBLOCK_SEQUENCE_CHANNEL_SIZE: usize = 128;
@@ -29,6 +30,8 @@ pub struct FlashBlockPendingSequence {
     block_broadcaster: broadcast::Sender<FlashBlockCompleteSequence>,
     /// Optional execution outcome from building the current sequence.
     execution_outcome: Option<SequenceExecutionOutcome>,
+    /// Cached reads from when this sequence was executed (for reuse in consecutive builds)
+    cached_reads: Option<CachedReads>,
 }
 
 impl FlashBlockPendingSequence
@@ -38,7 +41,12 @@ impl FlashBlockPendingSequence
         // Note: if the channel is full, send will not block but rather overwrite the oldest
         // messages. Order is preserved.
         let (tx, _) = broadcast::channel(FLASHBLOCK_SEQUENCE_CHANNEL_SIZE);
-        Self { inner: BTreeMap::new(), block_broadcaster: tx, execution_outcome: None }
+        Self {
+            inner: BTreeMap::new(),
+            block_broadcaster: tx,
+            execution_outcome: None,
+            cached_reads: None,
+        }
     }
 
     /// Returns the sender half of the [`FlashBlockCompleteSequence`] channel.
@@ -119,6 +127,16 @@ impl FlashBlockPendingSequence
         self.execution_outcome = execution_outcome;
     }
 
+    /// Set cached reads for this sequence
+    pub fn set_cached_reads(&mut self, cached_reads: CachedReads) {
+        self.cached_reads = Some(cached_reads);
+    }
+
+    /// Returns cached reads for this sequence
+    pub const fn cached_reads(&self) -> &Option<CachedReads> {
+        &self.cached_reads
+    }
+
     /// Returns the first block number
     pub fn block_number(&self) -> Option<u64> {
         Some(self.inner.values().next()?.block_number())
@@ -150,23 +168,16 @@ impl FlashBlockPendingSequence
 
     /// Finalizes the current pending sequence and returns it as a complete sequence.
     ///
-    /// Clears the internal state and returns `None` if the sequence is empty.
-    pub fn finalize(&mut self) -> Option<FlashBlockCompleteSequence> {
+    /// Clears the internal state and returns an error if the sequence is empty or validation fails.
+    pub fn finalize(&mut self) -> eyre::Result<FlashBlockCompleteSequence> {
         if self.inner.is_empty() {
-            return None;
+            bail!("Cannot finalize empty flashblock sequence");
         }
 
         let flashblocks = mem::take(&mut self.inner);
         let execution_outcome = mem::take(&mut self.execution_outcome);
 
-        FlashBlockCompleteSequence::new(
-            flashblocks.into_values().collect(),
-            execution_outcome,
-        )
-        .inspect_err(|err| {
-            debug!(target: "flashblocks", error = ?err, "Failed to finalize flashblock sequence");
-        })
-        .ok()
+        FlashBlockCompleteSequence::new(flashblocks.into_values().collect(), execution_outcome)
     }
 
     /// Returns an iterator over all flashblocks in the sequence.
@@ -243,6 +254,10 @@ impl FlashBlockCompleteSequence {
     /// Returns the execution outcome of the sequence.
     pub const fn execution_outcome(&self) -> Option<SequenceExecutionOutcome> {
         self.execution_outcome
+    }
+
+    pub const fn set_execution_outcome(&mut self, execution_outcome: Option<SequenceExecutionOutcome>) {
+        self.execution_outcome = execution_outcome;
     }
 
     /// Returns all transactions from all flashblocks in the sequence
