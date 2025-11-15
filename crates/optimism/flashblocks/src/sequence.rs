@@ -1,11 +1,9 @@
 use crate::{FlashBlock, FlashBlockCompleteSequenceRx};
-use alloy_eips::eip2718::WithEncoded;
 use alloy_primitives::{Bytes, B256};
 use alloy_rpc_types_engine::PayloadId;
 use core::mem;
 use eyre::{bail, OptionExt};
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
-use reth_primitives_traits::{Recovered, SignedTransaction};
 use std::{collections::BTreeMap, ops::Deref};
 use tokio::sync::broadcast;
 use tracing::{debug, trace, warn};
@@ -24,18 +22,16 @@ pub struct SequenceExecutionOutcome {
 
 /// An ordered B-tree keeping the track of a sequence of [`FlashBlock`]s by their indices.
 #[derive(Debug)]
-pub struct FlashBlockPendingSequence<T> {
+pub struct FlashBlockPendingSequence {
     /// tracks the individual flashblocks in order
-    inner: BTreeMap<u64, PreparedFlashBlock<T>>,
+    inner: BTreeMap<u64, FlashBlock>,
     /// Broadcasts flashblocks to subscribers.
     block_broadcaster: broadcast::Sender<FlashBlockCompleteSequence>,
     /// Optional execution outcome from building the current sequence.
     execution_outcome: Option<SequenceExecutionOutcome>,
 }
 
-impl<T> FlashBlockPendingSequence<T>
-where
-    T: SignedTransaction,
+impl FlashBlockPendingSequence
 {
     /// Create a new pending sequence.
     pub fn new() -> Self {
@@ -91,15 +87,15 @@ where
     /// Inserts a new block into the sequence.
     ///
     /// A [`FlashBlock`] with index 0 resets the set.
-    pub fn insert(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
+    pub fn insert(&mut self, flashblock: FlashBlock) {
         if flashblock.index == 0 {
             trace!(target: "flashblocks", number=%flashblock.block_number(), "Tracking new flashblock sequence");
 
             // Flash block at index zero resets the whole state.
             self.clear_and_broadcast_blocks();
 
-            self.inner.insert(flashblock.index, PreparedFlashBlock::new(flashblock)?);
-            return Ok(())
+            self.inner.insert(flashblock.index, flashblock);
+            return;
         }
 
         // only insert if we previously received the same block and payload, assume we received
@@ -109,12 +105,10 @@ where
 
         if same_block && same_payload {
             trace!(target: "flashblocks", number=%flashblock.block_number(), index = %flashblock.index, block_count = self.inner.len()  ,"Received followup flashblock");
-            self.inner.insert(flashblock.index, PreparedFlashBlock::new(flashblock)?);
+            self.inner.insert(flashblock.index, flashblock);
         } else {
             trace!(target: "flashblocks", number=%flashblock.block_number(), index = %flashblock.index, current=?self.block_number()  ,"Ignoring untracked flashblock following");
         }
-
-        Ok(())
     }
 
     /// Set execution outcome from building the flashblock sequence
@@ -125,31 +119,14 @@ where
         self.execution_outcome = execution_outcome;
     }
 
-    /// Iterator over sequence of executable transactions.
-    ///
-    /// A flashblocks is not ready if there's missing previous flashblocks, i.e. there's a gap in
-    /// the sequence
-    ///
-    /// Note: flashblocks start at `index 0`.
-    pub fn ready_transactions(&self) -> impl Iterator<Item = WithEncoded<Recovered<T>>> + '_ {
-        self.inner
-            .values()
-            .enumerate()
-            .take_while(|(idx, block)| {
-                // flashblock index 0 is the first flashblock
-                block.block().index == *idx as u64
-            })
-            .flat_map(|(_, block)| block.txs.clone())
-    }
-
     /// Returns the first block number
     pub fn block_number(&self) -> Option<u64> {
-        Some(self.inner.values().next()?.block().block_number())
+        Some(self.inner.values().next()?.block_number())
     }
 
     /// Returns the payload base of the first tracked flashblock.
     pub fn payload_base(&self) -> Option<OpFlashblockPayloadBase> {
-        self.inner.values().next()?.block().base.clone()
+        self.inner.values().next()?.base.clone()
     }
 
     /// Returns the number of tracked flashblocks.
@@ -159,23 +136,46 @@ where
 
     /// Returns the reference to the last flashblock.
     pub fn last_flashblock(&self) -> Option<&FlashBlock> {
-        self.inner.last_key_value().map(|(_, b)| &b.block)
+        self.inner.last_key_value().map(|(_, b)| b)
     }
 
     /// Returns the current/latest flashblock index in the sequence
     pub fn index(&self) -> Option<u64> {
-        Some(self.inner.values().last()?.block().index)
+        Some(self.inner.values().last()?.index)
     }
     /// Returns the payload id of the first tracked flashblock in the current sequence.
     pub fn payload_id(&self) -> Option<PayloadId> {
-        Some(self.inner.values().next()?.block().payload_id)
+        Some(self.inner.values().next()?.payload_id)
+    }
+
+    /// Finalizes the current pending sequence and returns it as a complete sequence.
+    ///
+    /// Clears the internal state and returns `None` if the sequence is empty.
+    pub fn finalize(&mut self) -> Option<FlashBlockCompleteSequence> {
+        if self.inner.is_empty() {
+            return None;
+        }
+
+        let flashblocks = mem::take(&mut self.inner);
+        let execution_outcome = mem::take(&mut self.execution_outcome);
+
+        FlashBlockCompleteSequence::new(
+            flashblocks.into_values().collect(),
+            execution_outcome,
+        )
+        .inspect_err(|err| {
+            debug!(target: "flashblocks", error = ?err, "Failed to finalize flashblock sequence");
+        })
+        .ok()
+    }
+
+    /// Returns an iterator over all flashblocks in the sequence.
+    pub fn flashblocks(&self) -> impl Iterator<Item = &FlashBlock> {
+        self.inner.values()
     }
 }
 
-impl<T> Default for FlashBlockPendingSequence<T>
-where
-    T: SignedTransaction,
-{
+impl Default for FlashBlockPendingSequence {
     fn default() -> Self {
         Self::new()
     }
@@ -259,171 +259,21 @@ impl Deref for FlashBlockCompleteSequence {
     }
 }
 
-impl<T> TryFrom<FlashBlockPendingSequence<T>> for FlashBlockCompleteSequence {
+impl TryFrom<FlashBlockPendingSequence> for FlashBlockCompleteSequence {
     type Error = eyre::Error;
-    fn try_from(sequence: FlashBlockPendingSequence<T>) -> Result<Self, Self::Error> {
+    fn try_from(sequence: FlashBlockPendingSequence) -> Result<Self, Self::Error> {
         Self::new(
-            sequence.inner.into_values().map(|block| block.block().clone()).collect::<Vec<_>>(),
+            sequence.inner.into_values().map(|block| block.clone()).collect::<Vec<_>>(),
             sequence.execution_outcome,
         )
     }
 }
 
-#[derive(Debug)]
-struct PreparedFlashBlock<T> {
-    /// The prepared transactions, ready for execution
-    txs: Vec<WithEncoded<Recovered<T>>>,
-    /// The tracked flashblock
-    block: FlashBlock,
-}
-
-impl<T> PreparedFlashBlock<T> {
-    const fn block(&self) -> &FlashBlock {
-        &self.block
-    }
-}
-
-impl<T> From<PreparedFlashBlock<T>> for FlashBlock {
-    fn from(val: PreparedFlashBlock<T>) -> Self {
-        val.block
-    }
-}
-
-impl<T> PreparedFlashBlock<T>
-where
-    T: SignedTransaction,
-{
-    /// Creates a flashblock that is ready for execution by preparing all transactions
-    ///
-    /// Returns an error if decoding or signer recovery fails.
-    fn new(block: FlashBlock) -> eyre::Result<Self> {
-        let mut txs = Vec::with_capacity(block.diff.transactions.len());
-        for encoded in block.diff.transactions.iter().cloned() {
-            let tx = T::decode_2718_exact(encoded.as_ref())?;
-            let signer = tx.try_recover()?;
-            let tx = WithEncoded::new(encoded, tx.with_signer(signer));
-            txs.push(tx);
-        }
-
-        Ok(Self { txs, block })
-    }
-}
-
-impl<T> Deref for PreparedFlashBlock<T> {
-    type Target = FlashBlock;
-
-    fn deref(&self) -> &Self::Target {
-        &self.block
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use alloy_consensus::{
-        transaction::SignerRecoverable, EthereumTxEnvelope, EthereumTypedTransaction, TxEip1559,
-    };
-    use alloy_eips::Encodable2718;
-    use alloy_primitives::{hex, Signature, TxKind, U256};
-    use op_alloy_rpc_types_engine::{
-        OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
-    };
-
-    #[test]
-    fn test_sequence_stops_before_gap() {
-        let mut sequence = FlashBlockPendingSequence::new();
-        let tx = EthereumTxEnvelope::new_unhashed(
-            EthereumTypedTransaction::<TxEip1559>::Eip1559(TxEip1559 {
-                chain_id: 4,
-                nonce: 26u64,
-                max_priority_fee_per_gas: 1500000000,
-                max_fee_per_gas: 1500000013,
-                gas_limit: 21_000u64,
-                to: TxKind::Call(hex!("61815774383099e24810ab832a5b2a5425c154d5").into()),
-                value: U256::from(3000000000000000000u64),
-                input: Default::default(),
-                access_list: Default::default(),
-            }),
-            Signature::new(
-                U256::from_be_bytes(hex!(
-                    "59e6b67f48fb32e7e570dfb11e042b5ad2e55e3ce3ce9cd989c7e06e07feeafd"
-                )),
-                U256::from_be_bytes(hex!(
-                    "016b83f4f980694ed2eee4d10667242b1f40dc406901b34125b008d334d47469"
-                )),
-                true,
-            ),
-        );
-        let tx = Recovered::new_unchecked(tx.clone(), tx.recover_signer_unchecked().unwrap());
-
-        sequence
-            .insert(OpFlashblockPayload {
-                payload_id: Default::default(),
-                index: 0,
-                base: None,
-                diff: OpFlashblockPayloadDelta {
-                    transactions: vec![tx.encoded_2718().into()],
-                    ..Default::default()
-                },
-                metadata: Default::default(),
-            })
-            .unwrap();
-
-        sequence
-            .insert(OpFlashblockPayload {
-                payload_id: Default::default(),
-                index: 2,
-                base: None,
-                diff: Default::default(),
-                metadata: Default::default(),
-            })
-            .unwrap();
-
-        let actual_txs: Vec<_> = sequence.ready_transactions().collect();
-        let expected_txs = vec![WithEncoded::new(tx.encoded_2718().into(), tx)];
-
-        assert_eq!(actual_txs, expected_txs);
-    }
-
-    #[test]
-    fn test_sequence_sends_flashblocks_to_subscribers() {
-        let mut sequence = FlashBlockPendingSequence::<EthereumTxEnvelope<TxEip1559>>::new();
-        let mut subscriber = sequence.subscribe_block_sequence();
-
-        for idx in 0..10 {
-            sequence
-                .insert(OpFlashblockPayload {
-                    payload_id: Default::default(),
-                    index: idx,
-                    base: Some(OpFlashblockPayloadBase::default()),
-                    diff: Default::default(),
-                    metadata: Default::default(),
-                })
-                .unwrap();
-        }
-
-        assert_eq!(sequence.count(), 10);
-
-        // Then we don't receive anything until we insert a new flashblock
-        let no_flashblock = subscriber.try_recv();
-        assert!(no_flashblock.is_err());
-
-        // Let's insert a new flashblock with index 0
-        sequence
-            .insert(OpFlashblockPayload {
-                payload_id: Default::default(),
-                index: 0,
-                base: Some(OpFlashblockPayloadBase::default()),
-                diff: Default::default(),
-                metadata: Default::default(),
-            })
-            .unwrap();
-
-        let flashblocks = subscriber.try_recv().unwrap();
-        assert_eq!(flashblocks.count(), 10);
-
-        for (idx, block) in flashblocks.iter().enumerate() {
-            assert_eq!(block.index, idx as u64);
-        }
-    }
+    // TODO: Add tests for:
+    // - FlashBlockPendingSequence insert() behavior
+    // - FlashBlockPendingSequence finalize() correctness
+    // - FlashBlockCompleteSequence invariants
+    // Note: Transaction recovery and broadcasting tests moved to cache.rs SequenceManager tests
 }

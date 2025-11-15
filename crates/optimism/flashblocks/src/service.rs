@@ -44,7 +44,7 @@ pub struct FlashBlockService<
 > {
     rx: S,
     current: Option<PendingFlashBlock<N>>,
-    blocks: FlashBlockPendingSequence<N::SignedTx>,
+    blocks: FlashBlockPendingSequence,
     /// Broadcast channel to forward received flashblocks from the subscription.
     received_flashblocks_tx: tokio::sync::broadcast::Sender<Arc<FlashBlock>>,
     rebuild: bool,
@@ -230,7 +230,7 @@ where
 
         Some(BuildArgs {
             base,
-            transactions: self.blocks.ready_transactions().collect::<Vec<_>>(),
+            transactions: vec![], // TODO: pass real transactions
             cached_state: self.cached_state.take(),
             last_flashblock_index: last_flashblock.index,
             last_flashblock_hash: last_flashblock.diff.block_hash,
@@ -349,12 +349,7 @@ where
                         if flashblock.index == 0 {
                             this.metrics.last_flashblock_length.record(this.blocks.count() as f64);
                         }
-                        match this.blocks.insert(flashblock) {
-                            Ok(_) => this.rebuild = true,
-                            Err(err) => {
-                                debug!(target: "flashblocks", %err, "Failed to prepare flashblock")
-                            }
-                        }
+                        this.blocks.insert(flashblock);
                     }
                     Err(err) => return Poll::Ready(Some(Err(err))),
                 }
