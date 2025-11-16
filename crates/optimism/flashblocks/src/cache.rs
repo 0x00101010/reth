@@ -33,26 +33,13 @@ pub(crate) struct SequenceManager<T> {
     /// Current pending sequence being built up from incoming flashblocks
     pending: FlashBlockPendingSequence,
     /// Ring buffer of recently completed sequences (FIFO, size 3)
-    completed_cache: AllocRingBuffer<CachedSequence>,
+    completed_cache: AllocRingBuffer<FlashBlockCompleteSequence>,
     /// Broadcast channel for completed sequences
     block_broadcaster: broadcast::Sender<FlashBlockCompleteSequence>,
     /// Whether to compute state roots when building blocks
     compute_state_root: bool,
     /// Phantom data for transaction type
     _phantom: std::marker::PhantomData<T>,
-}
-
-/// A cached completed flashblock sequence with associated metadata.
-#[derive(Debug, Clone)]
-pub(crate) struct CachedSequence {
-    /// Block number of this sequence
-    pub block_number: u64,
-    /// Parent hash that this sequence builds on top of
-    pub parent_hash: B256,
-    /// The complete flashblock sequence
-    pub sequence: FlashBlockCompleteSequence,
-    /// Cached reads from when this sequence was executed
-    pub cached_reads: Option<CachedReads>,
 }
 
 impl<T: SignedTransaction> SequenceManager<T> {
@@ -83,8 +70,9 @@ impl<T: SignedTransaction> SequenceManager<T> {
     /// Inserts a new flashblock into the pending sequence.
     ///
     /// When a flashblock with index 0 arrives (indicating a new block), the current
-    /// pending sequence is finalized, cached, and broadcast to subscribers immediately
-    /// (even if `state_root` hasn't been computed yet).
+    /// pending sequence is finalized, cached, and broadcast immediately. If the sequence
+    /// is later built on top of local tip, `on_build_complete()` will broadcast again
+    /// with computed `state_root`.
     pub(crate) fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
         // If this starts a new block, finalize and cache the previous sequence BEFORE inserting
         if flashblock.index == 0 && self.pending.count() > 0 {
@@ -100,21 +88,17 @@ impl<T: SignedTransaction> SequenceManager<T> {
                 "Caching completed flashblock sequence"
             );
 
-            // Add to cache (FIFO - oldest gets pushed out if full)
-            let cached = CachedSequence {
-                block_number,
-                parent_hash,
-                sequence: completed.clone(),
-                cached_reads: None, // Will be populated after execution
-            };
-
-            self.completed_cache.push(cached);
-
-            // Broadcast immediately to subscribers (even without state_root)
-            // ConsensusClient will check execution_outcome before sending newPayload
+            // Broadcast immediately to consensus client (even without state_root)
+            // This ensures sequences are forwarded during catch-up even if not buildable on tip.
+            // ConsensusClient checks execution_outcome and skips newPayload if state_root is zero.
             if self.block_broadcaster.receiver_count() > 0 {
-                let _ = self.block_broadcaster.send(completed);
+                let _ = self.block_broadcaster.send(completed.clone());
             }
+
+            // Add to cache (FIFO - oldest gets pushed out if full)
+            // If we later build this sequence, on_build_complete() will broadcast again with
+            // state_root
+            self.completed_cache.push(completed);
         }
 
         // Now insert the new flashblock
@@ -149,11 +133,11 @@ impl<T: SignedTransaction> SequenceManager<T> {
                 (base, last_fb, flashblocks, cached_state, "pending")
             }
             // Priority 2: Try cached sequence with exact parent match
-            else if let Some(cached) = self.completed_cache.iter().find(|c| c.parent_hash == local_tip_hash) {
-                let base = cached.sequence.payload_base().clone();
-                let last_fb = cached.sequence.last();
-                let flashblocks = cached.sequence.iter().collect::<Vec<_>>();
-                let cached_state = cached.cached_reads.as_ref().map(|r| (cached.parent_hash, r.clone()));
+            else if let Some(cached) = self.completed_cache.iter().find(|c| c.payload_base().parent_hash == local_tip_hash) {
+                let base = cached.payload_base().clone();
+                let last_fb = cached.last();
+                let flashblocks = cached.iter().collect::<Vec<_>>();
+                let cached_state = None;
                 (base, last_fb, flashblocks, cached_state, "cached")
             } else {
                 return None;
@@ -237,10 +221,11 @@ impl<T: SignedTransaction> SequenceManager<T> {
         Some(transactions)
     }
 
-    /// Records the result of building a sequence.
+    /// Records the result of building a sequence and re-broadcasts with execution outcome.
     ///
-    /// Updates both execution outcome and cached reads for whichever sequence was built
-    /// (pending or cached).
+    /// Updates execution outcome and cached reads. For cached sequences (already broadcast
+    /// once during finalize), this broadcasts again with the computed `state_root`, allowing
+    /// the consensus client to submit via `engine_newPayload`.
     pub(crate) fn on_build_complete<N: NodePrimitives>(
         &mut self,
         parent_hash: B256,
@@ -255,6 +240,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
             SequenceExecutionOutcome { block_hash: computed_block.block().hash(), state_root }
         });
 
+        // Update pending sequence with execution results
         if self.pending.payload_base().is_some_and(|base| base.parent_hash == parent_hash) {
             self.pending.set_execution_outcome(execution_outcome);
             self.pending.set_cached_reads(cached_reads);
@@ -264,33 +250,27 @@ impl<T: SignedTransaction> SequenceManager<T> {
                 has_computed_state_root = execution_outcome.is_some(),
                 "Updated pending sequence with build results"
             );
-            return;
-        };
-
-        // Building from cached - update cached reads
-        if let Some(cached) = self.completed_cache.iter_mut().find(|c| c.parent_hash == parent_hash)
-        {
-            cached.sequence.set_execution_outcome(execution_outcome);
-            cached.cached_reads = Some(cached_reads);
-            trace!(
-                target: "flashblocks",
-                block_number = cached.block_number,
-                has_state_root = execution_outcome.is_some(),
-                "Updated cached sequence with build results"
-            );
         }
-    }
-
-    /// Updates cached reads for the new canonical tip.
-    ///
-    /// Pre-fills the cache with state from the new canonical block to avoid
-    /// redundant I/O when building subsequent blocks.
-    pub(crate) fn on_new_canonical_tip(&mut self, tip_hash: B256, cached: CachedReads) {
-        // Store for potential use in next build
-        if let Some(cached_seq) =
-            self.completed_cache.iter_mut().find(|c| c.parent_hash == tip_hash)
+        // Check if this completed sequence in cache and broadcast with execution outcome
+        else if let Some(cached) =
+            self.completed_cache.iter_mut().find(|c| c.payload_base().parent_hash == parent_hash)
         {
-            cached_seq.cached_reads = Some(cached);
+            // Only re-broadcast if we computed new information (state_root was missing).
+            // If sequencer already provided state_root, we already broadcast in insert_flashblock,
+            // so skip re-broadcast to avoid duplicate FCU calls.
+            let needs_rebroadcast =
+                execution_outcome.is_some() && cached.execution_outcome().is_none();
+
+            cached.set_execution_outcome(execution_outcome);
+
+            if needs_rebroadcast && self.block_broadcaster.receiver_count() > 0 {
+                trace!(
+                    target: "flashblocks",
+                    block_number = cached.block_number(),
+                    "Re-broadcasting sequence with computed state_root"
+                );
+                let _ = self.block_broadcaster.send(cached.clone());
+            }
         }
     }
 }

@@ -6,7 +6,6 @@ use alloy_primitives::B256;
 use futures_util::{Stream, StreamExt};
 use metrics::Histogram;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
-use reth_chain_state::{CanonStateNotifications, CanonStateSubscriptions};
 use reth_evm::ConfigureEvm;
 use reth_metrics::Metrics;
 use reth_primitives_traits::{AlloyBlockHeader, BlockTy, HeaderTy, NodePrimitives, ReceiptTy};
@@ -30,8 +29,6 @@ pub struct FlashBlockService<
     incoming_flashblock_rx: S,
     /// Signals when a block build is in progress.
     in_progress_tx: watch::Sender<Option<FlashBlockBuildInfo>>,
-    /// Receiver for canonical chain update.
-    canon_receiver: CanonStateNotifications<N>,
     /// Broadcast channel to forward received flashblocks from the subscription.
     received_flashblocks_tx: tokio::sync::broadcast::Sender<Arc<FlashBlock>>,
 
@@ -64,7 +61,6 @@ where
         + Clone
         + 'static,
     Provider: StateProviderFactory
-        + CanonStateSubscriptions<Primitives = N>
         + BlockReaderIdExt<
             Header = HeaderTy<N>,
             Block = BlockTy<N>,
@@ -87,7 +83,6 @@ where
         Self {
             incoming_flashblock_rx,
             in_progress_tx,
-            canon_receiver: provider.subscribe_to_canonical_state(),
             received_flashblocks_tx,
             builder: FlashBlockBuilder::new(evm_config, provider),
             spawner,
@@ -181,25 +176,6 @@ where
                             warn!(target: "flashblocks", "Flashblock stream ended");
                             break;
                         }
-                    }
-                }
-
-                // Event 3: New canonical tip
-                Ok(state) = self.canon_receiver.recv() => {
-                    if let Some(tip) = state.tip_checked() {
-                        let mut cached = CachedReads::default();
-                        let committed = state.committed();
-                        let new_execution_outcome = committed.execution_outcome();
-                        for (addr, acc) in new_execution_outcome.bundle_accounts_iter() {
-                            if let Some(info) = acc.info.clone() {
-                                let storage = acc.storage.iter()
-                                    .map(|(key, slot)| (*key, slot.present_value))
-                                    .collect();
-                                cached.insert_account(addr, info, storage);
-                            }
-                        }
-                        self.sequences.on_new_canonical_tip(tip.hash(), cached);
-                        self.rebuild = true;
                     }
                 }
             }

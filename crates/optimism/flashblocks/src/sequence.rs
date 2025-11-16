@@ -143,7 +143,7 @@ impl FlashBlockPendingSequence {
 
         let flashblocks = mem::take(&mut self.inner);
         let execution_outcome = mem::take(&mut self.execution_outcome);
-        let _ = mem::take(&mut self.cached_reads);
+        self.cached_reads = None;
 
         FlashBlockCompleteSequence::new(flashblocks.into_values().collect(), execution_outcome)
     }

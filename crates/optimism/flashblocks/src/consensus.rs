@@ -147,6 +147,9 @@ where
                 continue;
             };
 
+            // Returns block_hash for FCU:
+            // - If state_root is available: submits newPayload and returns the new block's hash
+            // - If state_root is zero: skips newPayload and returns parent_hash (no progress yet)
             let block_hash = self.submit_new_payload(&sequence).await;
 
             self.submit_forkchoice_update(block_hash, &sequence).await;
