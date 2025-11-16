@@ -30,7 +30,10 @@ pub struct FlashBlockPendingSequence {
     block_broadcaster: broadcast::Sender<FlashBlockCompleteSequence>,
     /// Optional execution outcome from building the current sequence.
     execution_outcome: Option<SequenceExecutionOutcome>,
-    /// Cached reads from when this sequence was executed (for reuse in consecutive builds)
+    /// Cached state reads for the current block.
+    /// Current `PendingFlashBlock` is built out of a sequence of `FlashBlocks`, and executed again
+    /// when fb received on top of the same block. Avoid redundant I/O across multiple
+    /// executions within the same block.
     cached_reads: Option<CachedReads>,
 }
 
@@ -256,6 +259,7 @@ impl FlashBlockCompleteSequence {
         self.execution_outcome
     }
 
+    /// Updates execution outcome of the sequence.
     pub const fn set_execution_outcome(&mut self, execution_outcome: Option<SequenceExecutionOutcome>) {
         self.execution_outcome = execution_outcome;
     }

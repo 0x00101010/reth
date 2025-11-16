@@ -13,12 +13,13 @@ use alloy_primitives::B256;
 use reth_primitives_traits::{NodePrimitives, Recovered, SignedTransaction};
 use reth_revm::cached::CachedReads;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
-use std::time::Instant;
 use tokio::sync::broadcast;
 use tracing::{debug, trace};
 
 /// Maximum number of cached sequences in the ring buffer.
 const CACHE_SIZE: usize = 3;
+/// 200 ms flashblock time.
+pub(crate) const FLASHBLOCK_BLOCK_TIME: u64 = 200;
 
 /// Manages flashblock sequences with caching support.
 ///
@@ -28,7 +29,7 @@ const CACHE_SIZE: usize = 3;
 /// - Finding the best sequence to build based on local chain tip
 /// - Broadcasting completed sequences to subscribers
 #[derive(Debug)]
-pub struct SequenceManager<T> {
+pub(crate) struct SequenceManager<T> {
     /// Current pending sequence being built up from incoming flashblocks
     pending: FlashBlockPendingSequence,
     /// Ring buffer of recently completed sequences (FIFO, size 3)
@@ -43,7 +44,7 @@ pub struct SequenceManager<T> {
 
 /// A cached completed flashblock sequence with associated metadata.
 #[derive(Debug, Clone)]
-pub struct CachedSequence {
+pub(crate) struct CachedSequence {
     /// Block number of this sequence
     pub block_number: u64,
     /// Parent hash that this sequence builds on top of
@@ -52,13 +53,11 @@ pub struct CachedSequence {
     pub sequence: FlashBlockCompleteSequence,
     /// Cached reads from when this sequence was executed
     pub cached_reads: Option<CachedReads>,
-    /// When this sequence was added to the cache
-    pub cached_at: Instant,
 }
 
 impl<T: SignedTransaction> SequenceManager<T> {
     /// Creates a new sequence manager.
-    pub fn new(compute_state_root: bool) -> Self {
+    pub(crate) fn new(compute_state_root: bool) -> Self {
         let (block_broadcaster, _) = broadcast::channel(128);
         Self {
             pending: FlashBlockPendingSequence::new(),
@@ -70,14 +69,14 @@ impl<T: SignedTransaction> SequenceManager<T> {
     }
 
     /// Returns the sender half of the flashblock sequence broadcast channel.
-    pub const fn block_sequence_broadcaster(
+    pub(crate) const fn block_sequence_broadcaster(
         &self,
     ) -> &broadcast::Sender<FlashBlockCompleteSequence> {
         &self.block_broadcaster
     }
 
     /// Gets a subscriber to the flashblock sequences produced.
-    pub fn subscribe_block_sequence(&self) -> crate::FlashBlockCompleteSequenceRx {
+    pub(crate) fn subscribe_block_sequence(&self) -> crate::FlashBlockCompleteSequenceRx {
         self.block_broadcaster.subscribe()
     }
 
@@ -86,7 +85,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     /// When a flashblock with index 0 arrives (indicating a new block), the current
     /// pending sequence is finalized, cached, and broadcast to subscribers immediately
     /// (even if state_root hasn't been computed yet).
-    pub fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
+    pub(crate) fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
         // If this starts a new block, finalize and cache the previous sequence BEFORE inserting
         if flashblock.index == 0 {
             let completed = self.pending.finalize()?;
@@ -107,7 +106,6 @@ impl<T: SignedTransaction> SequenceManager<T> {
                 parent_hash,
                 sequence: completed.clone(),
                 cached_reads: None, // Will be populated after execution
-                cached_at: Instant::now(),
             };
 
             self.completed_cache.push(cached);
@@ -125,7 +123,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     }
 
     /// Returns the current pending sequence for inspection.
-    pub const fn pending(&self) -> &FlashBlockPendingSequence {
+    pub(crate) const fn pending(&self) -> &FlashBlockPendingSequence {
         &self.pending
     }
 
@@ -136,7 +134,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     /// 2. Cached sequence with exact parent match
     ///
     /// Returns None if nothing is buildable right now.
-    pub fn next_buildable_args(
+    pub(crate) fn next_buildable_args(
         &mut self,
         local_tip_hash: B256,
         local_tip_number: u64,
@@ -197,11 +195,11 @@ impl<T: SignedTransaction> SequenceManager<T> {
         // engine_newPayload. This is safe: we still have op-node as backstop to maintain
         // chain progression.
         let block_time_ms = (base.timestamp - local_tip_number) * 1000;
-        let expected_final_flashblock = block_time_ms / 200; // FLASHBLOCK_BLOCK_TIME
+        let expected_final_flashblock = block_time_ms / FLASHBLOCK_BLOCK_TIME;
         let compute_state_root = self.compute_state_root
             && last_flashblock.diff.state_root.is_zero()
             && last_flashblock.index >= expected_final_flashblock.saturating_sub(1);
-        
+
         let transactions = self.recover_transactions(flashblocks.into_iter())?;
 
         Some(BuildArgs {
@@ -238,7 +236,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     ///
     /// Updates both execution outcome and cached reads for whichever sequence was built
     /// (pending or cached).
-    pub fn on_build_complete<N: NodePrimitives>(
+    pub(crate) fn on_build_complete<N: NodePrimitives>(
         &mut self,
         parent_hash: B256,
         result: Option<(PendingFlashBlock<N>, CachedReads)>,
@@ -288,7 +286,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     ///
     /// Pre-fills the cache with state from the new canonical block to avoid
     /// redundant I/O when building subsequent blocks.
-    pub fn on_new_canonical_tip(&mut self, tip_hash: B256, cached: CachedReads) {
+    pub(crate) fn on_new_canonical_tip(&mut self, tip_hash: B256, cached: CachedReads) {
         // Store for potential use in next build
         if let Some(cached_seq) = self
             .completed_cache
@@ -297,11 +295,6 @@ impl<T: SignedTransaction> SequenceManager<T> {
         {
             cached_seq.cached_reads = Some(cached);
         }
-    }
-
-    /// Returns whether state root computation is enabled.
-    pub const fn compute_state_root(&self) -> bool {
-        self.compute_state_root
     }
 }
 
