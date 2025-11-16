@@ -84,7 +84,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     ///
     /// When a flashblock with index 0 arrives (indicating a new block), the current
     /// pending sequence is finalized, cached, and broadcast to subscribers immediately
-    /// (even if state_root hasn't been computed yet).
+    /// (even if `state_root` hasn't been computed yet).
     pub(crate) fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
         // If this starts a new block, finalize and cache the previous sequence BEFORE inserting
         if flashblock.index == 0 {
@@ -127,7 +127,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
         &self.pending
     }
 
-    /// Finds the next sequence to build and returns ready-to-use BuildArgs.
+    /// Finds the next sequence to build and returns ready-to-use `BuildArgs`.
     ///
     /// Priority order:
     /// 1. Current pending sequence (if parent matches local tip)
@@ -135,7 +135,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     ///
     /// Returns None if nothing is buildable right now.
     pub(crate) fn next_buildable_args(
-        &mut self,
+        &self,
         local_tip_hash: B256,
         local_tip_number: u64,
     ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
@@ -196,9 +196,9 @@ impl<T: SignedTransaction> SequenceManager<T> {
         // chain progression.
         let block_time_ms = (base.timestamp - local_tip_number) * 1000;
         let expected_final_flashblock = block_time_ms / FLASHBLOCK_BLOCK_TIME;
-        let compute_state_root = self.compute_state_root
-            && last_flashblock.diff.state_root.is_zero()
-            && last_flashblock.index >= expected_final_flashblock.saturating_sub(1);
+        let compute_state_root = self.compute_state_root &&
+            last_flashblock.diff.state_root.is_zero() &&
+            last_flashblock.index >= expected_final_flashblock.saturating_sub(1);
 
         let transactions = self.recover_transactions(flashblocks.into_iter())?;
 
@@ -247,10 +247,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
 
         // Extract execution outcome
         let execution_outcome = computed_block.computed_state_root().map(|state_root| {
-            SequenceExecutionOutcome {
-                block_hash: computed_block.block().hash(),
-                state_root,
-            }
+            SequenceExecutionOutcome { block_hash: computed_block.block().hash(), state_root }
         });
 
         if self.pending.payload_base().is_some_and(|base| base.parent_hash == parent_hash) {
@@ -266,10 +263,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
         };
 
         // Building from cached - update cached reads
-        if let Some(cached) = self
-            .completed_cache
-            .iter_mut()
-            .find(|c| c.parent_hash == parent_hash)
+        if let Some(cached) = self.completed_cache.iter_mut().find(|c| c.parent_hash == parent_hash)
         {
             cached.sequence.set_execution_outcome(execution_outcome);
             cached.cached_reads = Some(cached_reads);
@@ -288,23 +282,10 @@ impl<T: SignedTransaction> SequenceManager<T> {
     /// redundant I/O when building subsequent blocks.
     pub(crate) fn on_new_canonical_tip(&mut self, tip_hash: B256, cached: CachedReads) {
         // Store for potential use in next build
-        if let Some(cached_seq) = self
-            .completed_cache
-            .iter_mut()
-            .find(|c| c.parent_hash == tip_hash)
+        if let Some(cached_seq) =
+            self.completed_cache.iter_mut().find(|c| c.parent_hash == tip_hash)
         {
             cached_seq.cached_reads = Some(cached);
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // TODO: Add tests for:
-    // - insert_flashblock with index 0 caching and broadcasting
-    // - find_buildable_args priority order
-    // - cache eviction (FIFO)
-    // - on_build_complete updating cache vs pending
 }

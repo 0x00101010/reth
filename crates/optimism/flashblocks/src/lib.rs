@@ -28,8 +28,8 @@ pub use service::{FlashBlockBuildInfo, FlashBlockService};
 
 mod worker;
 
-mod ws;
 mod cache;
+mod ws;
 
 pub use ws::{WsConnect, WsFlashBlockStream};
 

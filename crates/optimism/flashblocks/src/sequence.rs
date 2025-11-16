@@ -4,10 +4,10 @@ use alloy_rpc_types_engine::PayloadId;
 use core::mem;
 use eyre::{bail, OptionExt};
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
+use reth_revm::cached::CachedReads;
 use std::{collections::BTreeMap, ops::Deref};
 use tokio::sync::broadcast;
 use tracing::{debug, trace, warn};
-use reth_revm::cached::CachedReads;
 
 /// The size of the broadcast channel for completed flashblock sequences.
 const FLASHBLOCK_SEQUENCE_CHANNEL_SIZE: usize = 128;
@@ -37,8 +37,7 @@ pub struct FlashBlockPendingSequence {
     cached_reads: Option<CachedReads>,
 }
 
-impl FlashBlockPendingSequence
-{
+impl FlashBlockPendingSequence {
     /// Create a new pending sequence.
     pub fn new() -> Self {
         // Note: if the channel is full, send will not block but rather overwrite the oldest
@@ -76,7 +75,7 @@ impl FlashBlockPendingSequence
         // If there are any subscribers, send the flashblocks to them.
         if self.block_broadcaster.receiver_count() > 0 {
             let flashblocks = match FlashBlockCompleteSequence::new(
-                flashblocks.into_iter().map(|block| block.1.into()).collect(),
+                flashblocks.into_iter().map(|block| block.1).collect(),
                 execution_outcome,
             ) {
                 Ok(flashblocks) => flashblocks,
@@ -260,7 +259,10 @@ impl FlashBlockCompleteSequence {
     }
 
     /// Updates execution outcome of the sequence.
-    pub const fn set_execution_outcome(&mut self, execution_outcome: Option<SequenceExecutionOutcome>) {
+    pub const fn set_execution_outcome(
+        &mut self,
+        execution_outcome: Option<SequenceExecutionOutcome>,
+    ) {
         self.execution_outcome = execution_outcome;
     }
 
@@ -281,10 +283,7 @@ impl Deref for FlashBlockCompleteSequence {
 impl TryFrom<FlashBlockPendingSequence> for FlashBlockCompleteSequence {
     type Error = eyre::Error;
     fn try_from(sequence: FlashBlockPendingSequence) -> Result<Self, Self::Error> {
-        Self::new(
-            sequence.inner.into_values().map(|block| block.clone()).collect::<Vec<_>>(),
-            sequence.execution_outcome,
-        )
+        Self::new(sequence.inner.into_values().collect(), sequence.execution_outcome)
     }
 }
 

@@ -1,8 +1,6 @@
 use crate::{
-    cache::SequenceManager,
-    worker::FlashBlockBuilder,
-    FlashBlock, FlashBlockCompleteSequence, FlashBlockCompleteSequenceRx, InProgressFlashBlockRx,
-    PendingFlashBlock,
+    cache::SequenceManager, worker::FlashBlockBuilder, FlashBlock, FlashBlockCompleteSequence,
+    FlashBlockCompleteSequenceRx, InProgressFlashBlockRx, PendingFlashBlock,
 };
 use alloy_primitives::B256;
 use futures_util::{Stream, StreamExt};
@@ -74,7 +72,7 @@ where
         evm_config: EvmConfig,
         provider: Provider,
         spawner: TaskExecutor,
-        compute_state_root: bool
+        compute_state_root: bool,
     ) -> Self {
         let (in_progress_tx, _) = watch::channel(None);
         let (received_flashblocks_tx, _) = tokio::sync::broadcast::channel(128);
