@@ -15,7 +15,7 @@ use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{oneshot, watch};
-use tracing::{debug, warn};
+use tracing::*;
 
 /// The `FlashBlockService` maintains an in-memory [`PendingFlashBlock`] built out of a sequence of
 /// [`FlashBlock`]s.
@@ -43,6 +43,14 @@ pub struct FlashBlockService<
     job: Option<BuildJob<N>>,
     /// Manages flashblock sequences with caching and intelligent build selection.
     sequences: SequenceManager<N::SignedTx>,
+    /// Tracks whether a rebuild is needed after state changes.
+    ///
+    /// Set to true when:
+    /// - New flashblocks arrive (sequence updated)
+    /// - Canonical tip changes (buildability may change)
+    ///
+    /// Set to false after `try_build()` executes to avoid redundant build attempts.
+    rebuild: bool,
 
     /// `FlashBlock` service's metrics
     metrics: FlashBlockServiceMetrics,
@@ -85,6 +93,7 @@ where
             spawner,
             job: None,
             sequences: SequenceManager::new(compute_state_root),
+            rebuild: false,
             metrics: FlashBlockServiceMetrics::default(),
         }
     }
@@ -123,11 +132,8 @@ where
     ///
     /// Note: this should be spawned
     pub async fn run(mut self, tx: watch::Sender<Option<PendingFlashBlock<N>>>) {
-        use futures_util::future::FutureExt;
-        use tokio::select;
-
         loop {
-            select! {
+            tokio::select! {
                 // Event 1: Build job completes
                 Some(result) = async {
                     match self.job.as_mut() {
@@ -147,6 +153,8 @@ where
 
                         let _ = tx.send(Some(pending));
                     }
+
+                    self.rebuild = false;
                 }
 
                 // Event 2: New flashblock arrives (batch process all ready flashblocks)
@@ -161,20 +169,9 @@ where
                                 );
                             }
                             if let Err(err) = self.sequences.insert_flashblock(flashblock) {
-                                debug!(target: "flashblocks", %err, "Failed to insert flashblock");
-                            }
-
-                            // Batch: consume all other ready flashblocks before continuing
-                            while let Some(Ok(fb)) = self.incoming_flashblock_rx.next().now_or_never().flatten() {
-                                self.notify_received_flashblock(&fb);
-                                if fb.index == 0 {
-                                    self.metrics.last_flashblock_length.record(
-                                        self.sequences.pending().count() as f64
-                                    );
-                                }
-                                if let Err(err) = self.sequences.insert_flashblock(fb) {
-                                    debug!(target: "flashblocks", %err, "Failed to insert flashblock");
-                                }
+                                trace!(target: "flashblocks", %err, "Failed to insert flashblock");
+                            } else {
+                                self.rebuild = true;
                             }
                         }
                         Some(Err(err)) => {
@@ -202,11 +199,14 @@ where
                             }
                         }
                         self.sequences.on_new_canonical_tip(tip.hash(), cached);
+                        self.rebuild = true;
                     }
                 }
             }
 
-            self.try_build().await;
+            if self.rebuild {
+                self.try_build().await;
+            }
         }
     }
 
@@ -227,7 +227,8 @@ where
             return;
         };
 
-        let Some(args) = self.sequences.next_buildable_args(latest.hash(), latest.number()) else {
+        let Some(args) = self.sequences.next_buildable_args(latest.hash(), latest.timestamp())
+        else {
             return; // Nothing buildable
         };
 

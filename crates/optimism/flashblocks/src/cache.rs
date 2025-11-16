@@ -14,7 +14,7 @@ use reth_primitives_traits::{NodePrimitives, Recovered, SignedTransaction};
 use reth_revm::cached::CachedReads;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use tokio::sync::broadcast;
-use tracing::{debug, trace};
+use tracing::*;
 
 /// Maximum number of cached sequences in the ring buffer.
 const CACHE_SIZE: usize = 3;
@@ -87,7 +87,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     /// (even if `state_root` hasn't been computed yet).
     pub(crate) fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
         // If this starts a new block, finalize and cache the previous sequence BEFORE inserting
-        if flashblock.index == 0 {
+        if flashblock.index == 0 && self.pending.count() > 0 {
             let completed = self.pending.finalize()?;
             let block_number = completed.block_number();
             let parent_hash = completed.payload_base().parent_hash;
@@ -137,7 +137,7 @@ impl<T: SignedTransaction> SequenceManager<T> {
     pub(crate) fn next_buildable_args(
         &self,
         local_tip_hash: B256,
-        local_tip_number: u64,
+        local_tip_timestamp: u64,
     ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
         // Try to find a buildable sequence: (base, last_fb, flashblocks, cached_state, source_name)
         let (base, last_flashblock, flashblocks, cached_state, source_name) =
@@ -158,13 +158,6 @@ impl<T: SignedTransaction> SequenceManager<T> {
             } else {
                 return None;
             };
-
-        debug!(
-            target: "flashblocks",
-            block_number = base.block_number,
-            source = source_name,
-            "Building from flashblock sequence"
-        );
 
         // Auto-detect when to compute state root: only if the builder didn't provide it (sent
         // B256::ZERO) and we're near the expected final flashblock index.
@@ -194,13 +187,25 @@ impl<T: SignedTransaction> SequenceManager<T> {
         // compute the state root, causing FlashblockConsensusClient to lack precomputed state for
         // engine_newPayload. This is safe: we still have op-node as backstop to maintain
         // chain progression.
-        let block_time_ms = (base.timestamp - local_tip_number) * 1000;
+        let block_time_ms = (base.timestamp - local_tip_timestamp) * 1000;
         let expected_final_flashblock = block_time_ms / FLASHBLOCK_BLOCK_TIME;
         let compute_state_root = self.compute_state_root &&
             last_flashblock.diff.state_root.is_zero() &&
             last_flashblock.index >= expected_final_flashblock.saturating_sub(1);
 
         let transactions = self.recover_transactions(flashblocks.into_iter())?;
+
+        trace!(
+            target: "flashblocks",
+            block_number = base.block_number,
+            source = source_name,
+            flashblock_index = last_flashblock.index,
+            expected_final_flashblock,
+            compute_state_root_enabled = self.compute_state_root,
+            state_root_is_zero = last_flashblock.diff.state_root.is_zero(),
+            will_compute_state_root = compute_state_root,
+            "Building from flashblock sequence"
+        );
 
         Some(BuildArgs {
             base,

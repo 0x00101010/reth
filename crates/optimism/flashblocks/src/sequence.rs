@@ -7,7 +7,7 @@ use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 use reth_revm::cached::CachedReads;
 use std::{collections::BTreeMap, ops::Deref};
 use tokio::sync::broadcast;
-use tracing::{debug, trace, warn};
+use tracing::*;
 
 /// The size of the broadcast channel for completed flashblock sequences.
 const FLASHBLOCK_SEQUENCE_CHANNEL_SIZE: usize = 128;
@@ -143,6 +143,7 @@ impl FlashBlockPendingSequence {
 
         let flashblocks = mem::take(&mut self.inner);
         let execution_outcome = mem::take(&mut self.execution_outcome);
+        let _ = mem::take(&mut self.cached_reads);
 
         FlashBlockCompleteSequence::new(flashblocks.into_values().collect(), execution_outcome)
     }
