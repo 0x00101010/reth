@@ -63,47 +63,12 @@ impl FlashBlockPendingSequence {
         self.block_broadcaster.subscribe()
     }
 
-    // Clears the state and broadcasts the blocks produced to subscribers.
-    fn clear_and_broadcast_blocks(&mut self) {
-        if self.inner.is_empty() {
-            return;
-        }
-
-        let flashblocks = mem::take(&mut self.inner);
-        let execution_outcome = mem::take(&mut self.execution_outcome);
-
-        // If there are any subscribers, send the flashblocks to them.
-        if self.block_broadcaster.receiver_count() > 0 {
-            let flashblocks = match FlashBlockCompleteSequence::new(
-                flashblocks.into_iter().map(|block| block.1).collect(),
-                execution_outcome,
-            ) {
-                Ok(flashblocks) => flashblocks,
-                Err(err) => {
-                    debug!(target: "flashblocks", error = ?err, "Failed to create full flashblock complete sequence");
-                    return;
-                }
-            };
-
-            // Note: this should only ever fail if there are no receivers. This can happen if
-            // there is a race condition between the clause right above and this
-            // one. We can simply warn the user and continue.
-            if let Err(err) = self.block_broadcaster.send(flashblocks) {
-                warn!(target: "flashblocks", error = ?err, "Failed to send flashblocks to subscribers");
-            }
-        }
-    }
-
     /// Inserts a new block into the sequence.
     ///
     /// A [`FlashBlock`] with index 0 resets the set.
     pub fn insert(&mut self, flashblock: FlashBlock) {
         if flashblock.index == 0 {
             trace!(target: "flashblocks", number=%flashblock.block_number(), "Tracking new flashblock sequence");
-
-            // Flash block at index zero resets the whole state.
-            self.clear_and_broadcast_blocks();
-
             self.inner.insert(flashblock.index, flashblock);
             return;
         }
