@@ -53,6 +53,7 @@ where
             }
         };
 
+        debug!(target: "flashblocks", ?payload, "Ready to submit payload");
         let block_number = payload.block_number();
         let block_hash = payload.block_hash();
         match self.engine_handle.new_payload(payload).await {
