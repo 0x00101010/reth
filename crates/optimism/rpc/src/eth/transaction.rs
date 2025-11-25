@@ -25,6 +25,8 @@ use std::{
     future::Future,
     time::Duration,
 };
+use std::hash::Hash;
+use alloy_eips::Encodable2718;
 use tokio_stream::wrappers::WatchStream;
 
 impl<N, Rpc> EthTransactions for OpEthApi<N, Rpc>
@@ -208,17 +210,22 @@ where
         }
 
         // 2. check flashblocks (sequencer preconfirmations)
-        if let Ok(Some(pending_block)) = self.pending_flashblock().await &&
-            let Some(indexed_tx) = pending_block.block().find_indexed(hash)
-        {
-            let meta = indexed_tx.meta();
-            return Ok(Some(TransactionSource::Block {
-                transaction: indexed_tx.recovered_tx().cloned(),
-                index: meta.index,
-                block_hash: meta.block_hash,
-                block_number: meta.block_number,
-                base_fee: meta.base_fee,
-            }));
+        if let Ok(Some(pending_block)) = self.pending_flashblock().await {
+            // Log all transaction hashes in the flashblock
+            let tx_hashes: Vec<_> = pending_block.block().body().transaction_hashes_iter().collect();
+            tracing::debug!(target: "rpc::eth", ?hash, ?tx_hashes, "checking flashblock for transaction");
+
+            if let Some(indexed_tx) = pending_block.block().find_indexed(hash) {
+                tracing::debug!(target: "rpc::eth", ?hash, index = indexed_tx.index(), "found transaction in flashblock");
+                let meta = indexed_tx.meta();
+                return Ok(Some(TransactionSource::Block {
+                    transaction: indexed_tx.recovered_tx().cloned(),
+                    index: meta.index,
+                    block_hash: meta.block_hash,
+                    block_number: meta.block_number,
+                    base_fee: meta.base_fee,
+                }));
+            }
         }
 
         // 3. check local pool
