@@ -28,7 +28,7 @@ use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta, TxHashRef},
     BlockHeader, TxReceipt,
 };
-use alloy_eips::BlockHashOrNumber;
+use alloy_eips::{BlockHashOrNumber, BlockNumHash};
 use alloy_primitives::{
     keccak256,
     map::{hash_map, AddressSet, B256Map, HashMap},
@@ -733,7 +733,19 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
 
             // Write all hashed state and trie updates in single batches.
             // This reduces cursor open/close overhead from N calls to 1.
-            if save_mode.with_state() && !state_trie_blocks.is_empty() {
+            // With a StateStore installed, it holds current state and its commitment: persist it
+            // through the state frontier instead of writing hashed state and trie tables.
+            if save_mode.with_state() &&
+                let Some(store) = reth_state_store::global() &&
+                let Some(last) = state_trie_blocks.last()
+            {
+                let start = Instant::now();
+                let last = last.recovered_block();
+                store
+                    .persist_through(BlockNumHash::new(last.number(), last.hash()))
+                    .map_err(ProviderError::other)?;
+                timings.write_hashed_state += start.elapsed();
+            } else if save_mode.with_state() && !state_trie_blocks.is_empty() {
                 let start = Instant::now();
                 let batch = ExecutedBlock::hashed_state_refs(state_trie_blocks);
                 let mask = ExecutedBlock::hashed_state_refs(state_trie_masking_blocks);

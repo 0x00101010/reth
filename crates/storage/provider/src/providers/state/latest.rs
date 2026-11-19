@@ -58,6 +58,12 @@ impl<'b, Provider: DBProvider> LatestStateProviderRef<'b, Provider> {
         hashed_address: B256,
         hashed_slot: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
+        if let Some(store) = reth_state_store::global() {
+            return store
+                .storage(hashed_address, hashed_slot)
+                .map(|value| (!value.is_zero()).then_some(value))
+                .map_err(ProviderError::other)
+        }
         let mut cursor = self.tx().cursor_dup_read::<tables::HashedStorages>()?;
         Ok(cursor
             .seek_by_key_subkey(hashed_address, hashed_slot)?
@@ -71,6 +77,9 @@ impl<Provider: DBProvider + StorageSettingsCache> AccountReader
 {
     /// Get basic account information.
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
+        if let Some(store) = reth_state_store::global() {
+            return store.account(alloy_primitives::keccak256(address)).map_err(ProviderError::other)
+        }
         if self.0.cached_storage_settings().use_hashed_state() {
             let hashed_address = alloy_primitives::keccak256(address);
             self.tx()
@@ -304,7 +313,9 @@ impl<Provider: DBProvider + BlockHashReader + StorageSettingsCache> StateProvide
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
-        if self.0.cached_storage_settings().use_hashed_state() {
+        if self.0.cached_storage_settings().use_hashed_state() ||
+            reth_state_store::global().is_some()
+        {
             self.hashed_storage_lookup(
                 alloy_primitives::keccak256(account),
                 alloy_primitives::keccak256(storage_key),

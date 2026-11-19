@@ -888,6 +888,9 @@ where
         &self,
         mut ctx: StateRootJobContext<'_, N, P, Evm>,
     ) -> ProviderResult<PreparedStateRootJob<N>> {
+        if let Some(store) = reth_state_store::global() {
+            return Ok(PreparedStateRootJob::new(Box::new(StateStoreRootJob { store }), None))
+        }
         if ctx.config.skip_state_root() {
             return Ok(PreparedStateRootJob::new(Box::new(SkippedStateRootJob {}), None))
         }
@@ -1017,6 +1020,47 @@ impl<N: NodePrimitives> StateRootJob<N> for SkippedStateRootJob {
         _output: Arc<BlockExecutionOutput<N::Receipt>>,
         _hashed_state: &LazyHashedPostState,
     ) -> ProviderResult<StateRootJobOutcome> {
+        Ok(StateRootJobOutcome::new(block.header().state_root(), Arc::new(TrieUpdates::default())))
+    }
+}
+
+/// Stages the block in the installed [`reth_state_store::BlockStateStore`], which holds current
+/// state and computes its own commitment.
+///
+/// The store's root is not the header's MPT root, so the outcome reports the header's root (as
+/// [`SkippedStateRootJob`] does) and the store's root is only recorded.
+#[derive(Debug)]
+struct StateStoreRootJob {
+    store: &'static Arc<dyn reth_state_store::BlockStateStore>,
+}
+
+impl<N: NodePrimitives> StateRootJob<N> for StateStoreRootJob {
+    fn name(&self) -> &'static str {
+        "state-store"
+    }
+
+    fn finish(
+        &mut self,
+        block: &RecoveredBlock<N::Block>,
+        _output: Arc<BlockExecutionOutput<N::Receipt>>,
+        hashed_state: &LazyHashedPostState,
+    ) -> ProviderResult<StateRootJobOutcome> {
+        let start = std::time::Instant::now();
+        let root = self
+            .store
+            .stage_block(
+                alloy_eips::BlockNumHash::new(block.number(), block.hash()),
+                block.header().parent_hash(),
+                hashed_state.get(),
+            )
+            .map_err(reth_errors::ProviderError::other)?;
+        tracing::debug!(
+            target: "engine::tree::state_store",
+            number = block.number(),
+            %root,
+            elapsed_us = start.elapsed().as_micros() as u64,
+            "Staged block in state store"
+        );
         Ok(StateRootJobOutcome::new(block.header().state_root(), Arc::new(TrieUpdates::default())))
     }
 }

@@ -36,6 +36,7 @@ reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
 reth-trie.workspace = true
 reth-trie-common.workspace = true
+reth-state-store.workspace = true
 
 # alloy
 alloy-evm.workspace = true

@@ -295,6 +295,13 @@ where
         }
 
         let start_block = input.next_block();
+        // Pipeline execution writes hashed state tables; a node whose state lives in a
+        // StateStore must sync through the engine instead.
+        if reth_state_store::global().is_some() {
+            return Err(StageError::Fatal(
+                "pipeline execution is unsupported with a StateStore installed".into(),
+            ))
+        }
         let max_block = input.target();
         let static_file_provider = provider.static_file_provider();
 

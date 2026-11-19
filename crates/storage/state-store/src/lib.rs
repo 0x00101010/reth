@@ -15,6 +15,9 @@ use alloy_primitives::{keccak256, BlockNumber, B256, KECCAK256_EMPTY as KECCAK_E
 use reth_primitives_traits::Account;
 use reth_trie_common::HashedPostState;
 
+mod by_hash;
+pub use by_hash::{global, set_global, BlockStateStore, ByHash};
+
 mod memory;
 pub use memory::{MemoryPending, MemoryReader, MemoryStateStore};
 
@@ -74,6 +77,9 @@ pub enum StateStoreError {
     /// The store cannot unwind to the requested block.
     #[error("cannot unwind to block {0}")]
     UnwindUnavailable(BlockNumber),
+    /// A block's parent is neither staged nor the persisted tip.
+    #[error("unknown parent block {0}")]
+    UnknownParent(B256),
     /// Backend failure.
     #[error(transparent)]
     Backend(Box<dyn core::error::Error + Send + Sync>),
