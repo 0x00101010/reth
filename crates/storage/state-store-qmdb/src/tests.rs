@@ -147,3 +147,46 @@ fn siblings_and_deletes_of_absent_keys() {
         Some(1)
     );
 }
+
+#[test]
+fn import_is_deterministic_and_readable() {
+    let entries = || {
+        (0..2_500u64).map(|i| {
+            let addr = B256::left_padding_from(&i.to_be_bytes());
+            Ok(if i % 2 == 0 {
+                account_entry(addr, &Account { nonce: i, ..Default::default() })
+            } else {
+                storage_entry(addr, B256::with_last_byte(1), U256::from(i))
+            })
+        })
+    };
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (open(&dir_a), open(&dir_b));
+    let mut chunks = 0;
+    let root_a = a.import(entries(), 1_000, block(7), |_| chunks += 1).unwrap();
+    let root_b = b.import(entries(), 1_000, block(7), |_| {}).unwrap();
+    assert_eq!(chunks, 3);
+    assert_eq!(root_a, root_b);
+    assert_ne!(
+        root_a,
+        open(&tempfile::tempdir().unwrap()).import(entries(), 999, block(7), |_| {}).unwrap()
+    );
+
+    let reader = a.reader(None).unwrap();
+    assert_eq!(
+        reader.account(B256::left_padding_from(&4u64.to_be_bytes())).unwrap().unwrap().nonce,
+        4
+    );
+    assert_eq!(
+        reader
+            .storage(B256::left_padding_from(&5u64.to_be_bytes()), B256::with_last_byte(1))
+            .unwrap(),
+        U256::from(5)
+    );
+    drop((a, reader));
+    assert_eq!(open(&dir_a).tip().unwrap(), Some((block(7), root_a)));
+
+    // Blocks stage on top of the imported tip.
+    let b8 = b.stage(None, block(8), &HashedPostState::default()).unwrap().0;
+    b.persist(vec![b8]).unwrap();
+}

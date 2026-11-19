@@ -32,5 +32,20 @@ commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = 
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 
+# qmdb-migrate
+clap = { workspace = true, features = ["derive"], optional = true }
+eyre = { workspace = true, optional = true }
+reth-db = { workspace = true, features = ["mdbx"], optional = true }
+reth-db-api = { workspace = true, optional = true }
+reth-libmdbx = { workspace = true, optional = true }
+reth-stages-types = { workspace = true, features = ["std"], optional = true }
+
 [dev-dependencies]
 tempfile.workspace = true
+
+[features]
+cli = ["dep:clap", "dep:eyre", "dep:reth-db", "dep:reth-db-api", "dep:reth-libmdbx", "dep:reth-stages-types"]
+
+[[bin]]
+name = "qmdb-migrate"
+required-features = ["cli"]

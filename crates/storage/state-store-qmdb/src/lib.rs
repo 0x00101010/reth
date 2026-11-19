@@ -12,6 +12,12 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Used only by the `qmdb-migrate` binary.
+#[cfg(feature = "cli")]
+use {
+    clap as _, eyre as _, reth_db as _, reth_db_api as _, reth_libmdbx as _, reth_stages_types as _,
+};
+
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{BlockNumber, B256, U256};
 use commonware_cryptography::{sha256::Digest, Sha256};
@@ -49,7 +55,8 @@ use std::{
 /// Bitmap chunk size in bytes (256 operations per chunk).
 const CHUNK: usize = 32;
 
-type Value = Vec<u8>;
+/// Encoded store value: a 72-byte account or a 32-byte slot.
+pub type Value = Vec<u8>;
 type QDb = Db<mmb::Family, Context, Digest, Value, Sha256, EightCap, CHUNK, Rayon>;
 type Batch = Arc<MerkleizedBatch<mmb::Family, Digest, Update<Digest, Value>, CHUNK, Rayon>>;
 type QDbConfig = DbConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ())), Rayon>;
@@ -160,6 +167,59 @@ impl QmdbStateStore {
             inner: Arc::new(inner),
             _shutdown: Arc::new(ShutdownOnDrop(Mutex::new(Some(shutdown_tx)))),
         })
+    }
+
+    /// Bulk-loads `entries` (from [`account_entry`] and [`storage_entry`]) into an empty store and
+    /// records `block` as its tip. Returns the root.
+    ///
+    /// The root depends on the input order and on chunking, so both are fixed: entries are
+    /// written in the given order in chunks of `chunk_size`, each merkleized, applied and
+    /// committed, followed by one empty batch that carries `block` as commit metadata.
+    /// `progress` is called with the running entry count after each chunk.
+    pub fn import(
+        &self,
+        entries: impl Iterator<Item = Result<(B256, Value), StateStoreError>>,
+        chunk_size: usize,
+        block: BlockNumHash,
+        mut progress: impl FnMut(u64),
+    ) -> Result<B256, StateStoreError> {
+        if self.inner.tip.lock().is_some() {
+            return Err(backend("import requires an empty store"));
+        }
+        let mut entries = entries.peekable();
+        let mut count = 0u64;
+        let mut guard = self.inner.db.write();
+        while entries.peek().is_some() {
+            let db = guard.as_ref().ok_or_else(poisoned)?;
+            let mut batch = db.new_batch();
+            for entry in entries.by_ref().take(chunk_size) {
+                let (k, v) = entry?;
+                batch = batch.write(key(k), Some(v));
+                count += 1;
+            }
+            let merkleized = self.inner.block_on(batch.merkleize(db)).map_err(backend)?;
+            self.apply_and_commit(&mut guard, merkleized)?;
+            progress(count);
+        }
+        let db = guard.as_ref().ok_or_else(poisoned)?;
+        let batch = db.new_batch().with_metadata(Some(encode_metadata(block)));
+        let merkleized = self.inner.block_on(batch.merkleize(db)).map_err(backend)?;
+        let root = self.apply_and_commit(&mut guard, merkleized)?;
+        *self.inner.tip.lock() = Some((block, root));
+        Ok(root)
+    }
+
+    fn apply_and_commit(
+        &self,
+        guard: &mut Option<QDb>,
+        batch: Batch,
+    ) -> Result<B256, StateStoreError> {
+        let db = guard.take().ok_or_else(poisoned)?;
+        let db = self.inner.block_on(db.apply_batch(batch)).map_err(backend)?;
+        let db = self.inner.block_on(db.commit()).map_err(backend)?;
+        let root = root_of(db.root());
+        *guard = Some(db);
+        Ok(root)
     }
 
     /// Writes a block's diff into a new batch on top of `parent` (or the database) and
@@ -286,13 +346,8 @@ impl StateStore for QmdbStateStore {
             expected = Some((pending.block, pending.root));
         }
 
-        let mut guard = self.inner.db.write();
-        let db = guard.take().ok_or_else(poisoned)?;
-        let db = self.inner.block_on(db.apply_batch(last.batch.clone())).map_err(backend)?;
-        let db = self.inner.block_on(db.commit()).map_err(backend)?;
-        debug_assert_eq!(root_of(db.root()), last.root);
-        *guard = Some(db);
-        drop(guard);
+        let root = self.apply_and_commit(&mut self.inner.db.write(), last.batch.clone())?;
+        debug_assert_eq!(root, last.root);
 
         self.inner.live.lock().retain(|number, _| *number > last.block.number);
         *self.inner.tip.lock() = Some((last.block, last.root));
@@ -340,6 +395,16 @@ fn db_config(ctx: &Context, config: &QmdbConfig) -> QDbConfig {
         init_buffer: NonZeroUsize::new(1 << 21).expect("non-zero"),
         init_concurrency: (),
     }
+}
+
+/// Store entry of an account.
+pub fn account_entry(hashed_address: B256, account: &Account) -> (B256, Value) {
+    (hashed_address, encode_account(account).to_vec())
+}
+
+/// Store entry of a non-zero storage slot.
+pub fn storage_entry(hashed_address: B256, hashed_slot: B256, value: U256) -> (B256, Value) {
+    (storage_key(hashed_address, hashed_slot), value.to_be_bytes::<32>().to_vec())
 }
 
 fn key(hash: B256) -> Digest {
