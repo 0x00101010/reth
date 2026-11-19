@@ -1,0 +1,36 @@
+[package]
+name = "reth-state-store-qmdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "QMDB-backed StateStore"
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-primitives-traits.workspace = true
+reth-state-store.workspace = true
+reth-trie-common = { workspace = true, features = ["std"] }
+
+# alloy
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+
+# commonware, pinned by rev
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
+commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
+commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
+
+# misc
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
