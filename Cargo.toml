@@ -109,6 +109,7 @@ members = [
     "crates/storage/provider/",
     "crates/storage/storage-api/",
     "crates/storage/storage-overlay/",
+    "crates/storage/state-store/",
     "crates/tasks/",
     "crates/tokio-util/",
     "crates/tracing/",
@@ -423,6 +424,7 @@ reth-static-file-types = { path = "crates/static-file/types", default-features =
 reth-storage-api = { path = "crates/storage/storage-api", default-features = false }
 reth-storage-errors = { path = "crates/storage/errors", default-features = false }
 reth-storage-overlay = { path = "crates/storage/storage-overlay" }
+reth-state-store = { path = "crates/storage/state-store" }
 reth-tasks = { path = "crates/tasks" }
 reth-testing-utils = { path = "testing/testing-utils" }
 reth-tokio-util = { path = "crates/tokio-util" }

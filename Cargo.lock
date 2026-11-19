@@ -10673,6 +10673,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-state-store"
+version = "2.8.1"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "parking_lot",
+ "reth-primitives-traits",
+ "reth-trie-common",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "reth-static-file"
 version = "2.8.1"
 dependencies = [

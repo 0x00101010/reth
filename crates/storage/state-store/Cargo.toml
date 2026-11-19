@@ -1,0 +1,25 @@
+[package]
+name = "reth-state-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Current state plus its commitment, at whole-block granularity"
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-primitives-traits.workspace = true
+reth-trie-common = { workspace = true, features = ["std"] }
+
+# alloy
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+
+# misc
+parking_lot.workspace = true
+thiserror.workspace = true
