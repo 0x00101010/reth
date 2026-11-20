@@ -15,7 +15,8 @@
 // Used only by the `qmdb-migrate` binary.
 #[cfg(feature = "cli")]
 use {
-    clap as _, eyre as _, reth_db as _, reth_db_api as _, reth_libmdbx as _, reth_stages_types as _,
+    clap as _, eyre as _, rayon as _, reth_db as _, reth_db_api as _, reth_libmdbx as _,
+    reth_stages_types as _,
 };
 
 use alloy_eips::BlockNumHash;
@@ -32,7 +33,10 @@ use commonware_storage::{
     merkle::{full, mmb},
     qmdb::current::{
         batch::MerkleizedBatch,
-        ordered::variable::{Config as DbConfig, Db, Update},
+        ordered::variable::{
+            partitioned::{Config as DbConfig, Db},
+            Update,
+        },
     },
     translator::EightCap,
 };
@@ -50,6 +54,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
     thread,
+    time::{Duration, Instant},
 };
 
 /// Bitmap chunk size in bytes (256 operations per chunk).
@@ -57,7 +62,12 @@ const CHUNK: usize = 32;
 
 /// Encoded store value: a 72-byte account or a 32-byte slot.
 pub type Value = Vec<u8>;
-type QDb = Db<mmb::Family, Context, Digest, Value, Sha256, EightCap, CHUNK, Rayon>;
+/// Index partition prefix bytes: `2^(8*P)` partitions. P=3 (16.8M partitions) is the largest
+/// Commonware supports; partitions spill from sorted arrays to `BTreeMap`s past ~511 entries,
+/// i.e. ~8.5B keys in total at P=3.
+const PARTITION_BYTES: usize = 3;
+
+type QDb = Db<mmb::Family, Context, Digest, Value, Sha256, EightCap, PARTITION_BYTES, CHUNK, Rayon>;
 type Batch = Arc<MerkleizedBatch<mmb::Family, Digest, Update<Digest, Value>, CHUNK, Rayon>>;
 type QDbConfig = DbConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ())), Rayon>;
 
@@ -169,37 +179,43 @@ impl QmdbStateStore {
         })
     }
 
-    /// Bulk-loads `entries` (from [`account_entry`] and [`storage_entry`]) into an empty store and
-    /// records `block` as its tip. Returns the root.
+    /// Bulk-loads `chunks` of entries (from [`account_entry`] and [`storage_entry`]) into an empty
+    /// store and records `block` as its tip. Returns the root.
     ///
-    /// The root depends on the input order and on chunking, so both are fixed: entries are
-    /// written in the given order in chunks of `chunk_size`, each merkleized, applied and
-    /// committed, followed by one empty batch that carries `block` as commit metadata.
-    /// `progress` is called with the running entry count after each chunk.
+    /// The root depends on the input order and on chunking, so both are fixed by the caller:
+    /// written chunk by chunk, each chunk merkleized, applied and committed, followed by one empty
+    /// batch that carries `block` as commit metadata. Order within a chunk does not matter (a
+    /// batch sorts its writes); chunk boundaries do.
+    /// `progress` is called with running totals after each chunk.
     pub fn import(
         &self,
-        entries: impl Iterator<Item = Result<(B256, Value), StateStoreError>>,
-        chunk_size: usize,
+        chunks: impl Iterator<Item = Result<Vec<(B256, Value)>, StateStoreError>>,
         block: BlockNumHash,
-        mut progress: impl FnMut(u64),
+        mut progress: impl FnMut(&ImportProgress),
     ) -> Result<B256, StateStoreError> {
         if self.inner.tip.lock().is_some() {
             return Err(backend("import requires an empty store"));
         }
-        let mut entries = entries.peekable();
-        let mut count = 0u64;
+        let mut stats = ImportProgress::default();
         let mut guard = self.inner.db.write();
-        while entries.peek().is_some() {
+        let mut start = Instant::now();
+        for chunk in chunks {
+            let chunk = chunk?;
             let db = guard.as_ref().ok_or_else(poisoned)?;
             let mut batch = db.new_batch();
-            for entry in entries.by_ref().take(chunk_size) {
-                let (k, v) = entry?;
+            stats.entries += chunk.len() as u64;
+            for (k, v) in chunk {
                 batch = batch.write(key(k), Some(v));
-                count += 1;
             }
+            let read = Instant::now();
             let merkleized = self.inner.block_on(batch.merkleize(db)).map_err(backend)?;
+            let merkleize = Instant::now();
             self.apply_and_commit(&mut guard, merkleized)?;
-            progress(count);
+            stats.read += read - start;
+            stats.merkleize += merkleize - read;
+            stats.apply_commit += merkleize.elapsed();
+            progress(&stats);
+            start = Instant::now();
         }
         let db = guard.as_ref().ok_or_else(poisoned)?;
         let batch = db.new_batch().with_metadata(Some(encode_metadata(block)));
@@ -247,6 +263,19 @@ impl QmdbStateStore {
         let batch = batch.with_metadata(Some(encode_metadata(block)));
         self.inner.block_on(batch.merkleize(db)).map_err(backend)
     }
+}
+
+/// Running totals reported by [`QmdbStateStore::import`] after each chunk.
+#[derive(Debug, Default, Clone)]
+pub struct ImportProgress {
+    /// Entries imported so far.
+    pub entries: u64,
+    /// Time spent waiting for the next chunk and staging it.
+    pub read: Duration,
+    /// Time spent merkleizing.
+    pub merkleize: Duration,
+    /// Time spent applying and committing.
+    pub apply_commit: Duration,
 }
 
 /// A staged, unpersisted block of a [`QmdbStateStore`].
@@ -393,7 +422,7 @@ fn db_config(ctx: &Context, config: &QmdbConfig) -> QDbConfig {
         translator: EightCap,
         init_cache: NonZeroUsize::new(1 << 22),
         init_buffer: NonZeroUsize::new(1 << 21).expect("non-zero"),
-        init_concurrency: (),
+        init_concurrency: config.threads,
     }
 }
 
