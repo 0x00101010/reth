@@ -225,6 +225,8 @@ fn prunes_behind_retention_window_and_reopens() {
         q_parent = Some(q);
         r_parent = Some(r);
     }
+    // Pruning runs in the background; wait for it before checking.
+    store.flush_pruning();
     let pruned_to = *store.inner.pruned_to.lock();
     assert!(pruned_to > 0, "nothing was pruned");
     let tip = store.tip().unwrap();
@@ -232,6 +234,7 @@ fn prunes_behind_retention_window_and_reopens() {
 
     let reopened = open_pruning();
     assert_eq!(reopened.tip().unwrap(), tip);
+    reopened.flush_pruning();
     assert_eq!(*reopened.inner.pruned_to.lock(), pruned_to);
     assert_same_reads(
         &reopened.reader(None).unwrap(),

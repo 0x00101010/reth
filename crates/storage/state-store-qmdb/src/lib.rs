@@ -114,7 +114,7 @@ struct Inner {
     live: Mutex<BTreeMap<BlockNumber, Vec<Batch>>>,
     tip: Mutex<Option<(BlockNumHash, B256)>>,
     checkpoints: Mutex<Checkpoints>,
-    /// Location the database was last pruned to (logically; see `maybe_prune`).
+    /// Location the database was last pruned to (logically; see `prune_once`).
     pruned_to: Mutex<u64>,
     retain_blocks: u64,
     prune_step: u64,
@@ -136,13 +136,89 @@ impl Inner {
         let guard = self.db.read();
         f(guard.as_ref().ok_or_else(poisoned)?)
     }
+
+    /// Records the database's current commit as `number`'s checkpoint.
+    fn record_db_checkpoint(
+        &self,
+        guard: &Option<QDb>,
+        number: u64,
+    ) -> Result<(), StateStoreError> {
+        let db = guard.as_ref().ok_or_else(poisoned)?;
+        let checkpoint =
+            Checkpoint { number, size: *db.bounds().end, sync_boundary: *db.sync_boundary() };
+        self.checkpoints.lock().append(&[checkpoint]).map_err(backend)
+    }
+
+    /// Prunes inactive operations older than the retention window, once the prune point has
+    /// advanced at least `prune_step` operations. Holds the database write lock only while
+    /// pruning, which blocks staging and reads for that long.
+    fn prune_once(&self) -> Result<(), StateStoreError> {
+        let Some((tip, _)) = *self.tip.lock() else { return Ok(()) };
+        let Some(target) = self.checkpoints.lock().prune_target(tip.number, self.retain_blocks)
+        else {
+            return Ok(())
+        };
+        let mut pruned_to = self.pruned_to.lock();
+        if target.sync_boundary < *pruned_to + self.prune_step {
+            return Ok(())
+        }
+        let mut guard = self.db.write();
+        let locked = Instant::now();
+        let db = guard.take().ok_or_else(poisoned)?;
+        let db = self.block_on(db.prune(Location::from(target.sync_boundary))).map_err(backend)?;
+        *guard = Some(db);
+        drop(guard);
+        let lock_held = locked.elapsed();
+        let pruned_ops = target.sync_boundary - *pruned_to;
+        // The log frees whole blobs, so its physical start can stay behind the logical prune point.
+        *pruned_to = target.sync_boundary;
+        self.checkpoints.lock().drop_before(target.number).map_err(backend)?;
+        tracing::info!(
+            target: "state_store::qmdb",
+            tip = tip.number,
+            prune_block = target.number,
+            pruned_ops,
+            pruned_to = *pruned_to,
+            lock_held_ms = lock_held.as_millis() as u64,
+            "Pruned QMDB log"
+        );
+        Ok(())
+    }
+}
+
+enum PruneRequest {
+    /// Prune if the retention window allows it.
+    Check,
+    /// Like `Check`, then acknowledge.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+/// Prunes on its own thread so commits never wait for it. Requests that queue up while a prune
+/// runs are coalesced into one check.
+fn run_pruner(inner: Arc<Inner>, requests: std::sync::mpsc::Receiver<PruneRequest>) {
+    while let Ok(first) = requests.recv() {
+        let acks: Vec<_> = std::iter::once(first)
+            .chain(requests.try_iter())
+            .filter_map(|request| match request {
+                PruneRequest::Check => None,
+                PruneRequest::Flush(ack) => Some(ack),
+            })
+            .collect();
+        if let Err(error) = inner.prune_once() {
+            tracing::error!(target: "state_store::qmdb", %error, "QMDB prune failed");
+        }
+        for ack in acks {
+            let _ = ack.send(());
+        }
+    }
 }
 
 /// QMDB-backed [`StateStore`].
 #[derive(Clone)]
 pub struct QmdbStateStore {
     inner: Arc<Inner>,
-    _shutdown: Arc<ShutdownOnDrop>,
+    background: Arc<Background>,
 }
 
 impl std::fmt::Debug for QmdbStateStore {
@@ -151,12 +227,29 @@ impl std::fmt::Debug for QmdbStateStore {
     }
 }
 
-/// Stops the runtime thread when the last store handle is dropped.
-struct ShutdownOnDrop(Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+/// The pruner thread and the runtime's shutdown signal. When the last store handle is dropped,
+/// stops the pruner (after it finishes queued work) and then the runtime it uses.
+struct Background {
+    pruner_tx: Mutex<Option<std::sync::mpsc::Sender<PruneRequest>>>,
+    pruner: Mutex<Option<thread::JoinHandle<()>>>,
+    shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
 
-impl Drop for ShutdownOnDrop {
+impl Background {
+    fn request(&self, request: PruneRequest) {
+        if let Some(tx) = &*self.pruner_tx.lock() {
+            let _ = tx.send(request);
+        }
+    }
+}
+
+impl Drop for Background {
     fn drop(&mut self) {
-        if let Some(tx) = self.0.lock().take() {
+        drop(self.pruner_tx.lock().take());
+        if let Some(pruner) = self.pruner.lock().take() {
+            let _ = pruner.join();
+        }
+        if let Some(tx) = self.shutdown.lock().take() {
             let _ = tx.send(());
         }
     }
@@ -200,65 +293,39 @@ impl QmdbStateStore {
             Ok(metadata.map(|bytes| (decode_metadata(&bytes), root_of(db.root()))))
         })?;
         *inner.tip.lock() = tip;
+        let inner = Arc::new(inner);
+        let (pruner_tx, pruner_rx) = std::sync::mpsc::channel();
+        let pruner = {
+            let inner = inner.clone();
+            thread::Builder::new()
+                .name("qmdb-pruner".into())
+                .spawn(move || run_pruner(inner, pruner_rx))
+                .map_err(backend)?
+        };
         let store = Self {
-            inner: Arc::new(inner),
-            _shutdown: Arc::new(ShutdownOnDrop(Mutex::new(Some(shutdown_tx)))),
+            inner,
+            background: Arc::new(Background {
+                pruner_tx: Mutex::new(Some(pruner_tx)),
+                pruner: Mutex::new(Some(pruner)),
+                shutdown: Mutex::new(Some(shutdown_tx)),
+            }),
         };
         // A database created before checkpoints existed starts its window at its tip.
-        let mut guard = store.inner.db.write();
         if let Some((tip, _)) = tip &&
             store.inner.checkpoints.lock().is_empty()
         {
-            store.record_db_checkpoint(&guard, tip.number)?;
+            store.inner.record_db_checkpoint(&store.inner.db.read(), tip.number)?;
         }
-        store.maybe_prune(&mut guard)?;
-        drop(guard);
+        store.background.request(PruneRequest::Check);
         Ok(store)
     }
 
-    /// Records the database's current commit as `number`'s checkpoint.
-    fn record_db_checkpoint(
-        &self,
-        guard: &Option<QDb>,
-        number: u64,
-    ) -> Result<(), StateStoreError> {
-        let db = guard.as_ref().ok_or_else(poisoned)?;
-        let checkpoint =
-            Checkpoint { number, size: *db.bounds().end, sync_boundary: *db.sync_boundary() };
-        self.inner.checkpoints.lock().append(&[checkpoint]).map_err(backend)
-    }
-
-    /// Prunes inactive operations older than the retention window, in steps of whole blobs.
-    fn maybe_prune(&self, guard: &mut Option<QDb>) -> Result<(), StateStoreError> {
-        let Some((tip, _)) = *self.inner.tip.lock() else { return Ok(()) };
-        let Some(target) =
-            self.inner.checkpoints.lock().prune_target(tip.number, self.inner.retain_blocks)
-        else {
-            return Ok(())
-        };
-        let mut pruned_to = self.inner.pruned_to.lock();
-        if target.sync_boundary < *pruned_to + self.inner.prune_step {
-            return Ok(())
-        }
-        let start = Instant::now();
-        let db = guard.take().ok_or_else(poisoned)?;
-        let db =
-            self.inner.block_on(db.prune(Location::from(target.sync_boundary))).map_err(backend)?;
-        let pruned_ops = target.sync_boundary - *pruned_to;
-        // The log frees whole blobs, so its physical start can stay behind the logical prune point.
-        *pruned_to = target.sync_boundary;
-        *guard = Some(db);
-        self.inner.checkpoints.lock().drop_before(target.number).map_err(backend)?;
-        tracing::info!(
-            target: "state_store::qmdb",
-            tip = tip.number,
-            prune_block = target.number,
-            pruned_ops,
-            pruned_to = *pruned_to,
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "Pruned QMDB log"
-        );
-        Ok(())
+    /// Blocks until the pruner has handled every request made so far.
+    #[cfg(test)]
+    fn flush_pruning(&self) {
+        let (ack, done) = std::sync::mpsc::channel();
+        self.background.request(PruneRequest::Flush(ack));
+        let _ = done.recv();
     }
 
     /// Bulk-loads `chunks` of entries (from [`account_entry`] and [`storage_entry`]) into an empty
@@ -304,8 +371,9 @@ impl QmdbStateStore {
         let merkleized = self.inner.block_on(batch.merkleize(db)).map_err(backend)?;
         let root = self.apply_and_commit(&mut guard, merkleized)?;
         *self.inner.tip.lock() = Some((block, root));
-        self.record_db_checkpoint(&guard, block.number)?;
-        self.maybe_prune(&mut guard)?;
+        self.inner.record_db_checkpoint(&guard, block.number)?;
+        drop(guard);
+        self.background.request(PruneRequest::Check);
         Ok(root)
     }
 
@@ -461,6 +529,7 @@ impl StateStore for QmdbStateStore {
 
         let mut guard = self.inner.db.write();
         let root = self.apply_and_commit(&mut guard, last.batch.clone())?;
+        drop(guard);
         debug_assert_eq!(root, last.root);
         let checkpoints: Vec<_> = chain
             .iter()
@@ -474,7 +543,8 @@ impl StateStore for QmdbStateStore {
 
         self.inner.live.lock().retain(|number, _| *number > last.block.number);
         *self.inner.tip.lock() = Some((last.block, last.root));
-        self.maybe_prune(&mut guard)
+        self.background.request(PruneRequest::Check);
+        Ok(())
     }
 
     fn tip(&self) -> Result<Option<(BlockNumHash, B256)>, StateStoreError> {

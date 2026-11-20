@@ -53,11 +53,11 @@ impl Checkpoints {
         self.entries.is_empty()
     }
 
-    /// Durably appends `checkpoints`.
+    /// Appends `checkpoints` without fsync, so commits don't wait on it. A crash can lose the
+    /// newest records; the prune target then comes from older ones, which only prunes less.
     pub(crate) fn append(&mut self, checkpoints: &[Checkpoint]) -> io::Result<()> {
         let bytes: Vec<u8> = checkpoints.iter().flat_map(encode).collect();
         self.file.write_all(&bytes)?;
-        self.file.sync_data()?;
         self.entries.extend(checkpoints);
         Ok(())
     }
