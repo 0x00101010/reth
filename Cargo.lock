@@ -11470,6 +11470,7 @@ dependencies = [
  "commonware-storage",
  "eyre",
  "parking_lot 0.12.5",
+ "rayon",
  "reth-db",
  "reth-db-api",
  "reth-libmdbx",
@@ -11479,6 +11480,7 @@ dependencies = [
  "reth-trie-common",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -11584,6 +11586,7 @@ dependencies = [
  "reth-provider",
  "reth-prune-types",
  "reth-stages-types",
+ "reth-state-store",
  "reth-storage-api",
  "reth-storage-errors",
  "reth-tasks",

@@ -1542,6 +1542,9 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
 
 impl<TX: DbTx, N: NodeTypes> AccountReader for DatabaseProvider<TX, N> {
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
+        if let Some(store) = reth_state_store::global() {
+            return store.account(keccak256(address)).map_err(ProviderError::other)
+        }
         if self.cached_storage_settings().use_hashed_state() {
             let hashed_address = keccak256(address);
             Ok(self.tx.get_by_encoded_key::<tables::HashedAccounts>(&hashed_address)?)
@@ -1565,6 +1568,14 @@ impl<TX: DbTx + 'static, N: NodeTypes> AccountExtReader for DatabaseProvider<TX,
         &self,
         iter: impl IntoIterator<Item = Address>,
     ) -> ProviderResult<Vec<(Address, Option<Account>)>> {
+        if let Some(store) = reth_state_store::global() {
+            return iter
+                .into_iter()
+                .map(|address| {
+                    Ok((address, store.account(keccak256(address)).map_err(ProviderError::other)?))
+                })
+                .collect()
+        }
         if self.cached_storage_settings().use_hashed_state() {
             let mut hashed_accounts = self.tx.cursor_read::<tables::HashedAccounts>()?;
             Ok(iter
@@ -2463,6 +2474,24 @@ impl<TX: DbTx + 'static, N: NodeTypes> StorageReader for DatabaseProvider<TX, N>
         &self,
         addresses_with_keys: impl IntoIterator<Item = (Address, impl IntoIterator<Item = B256>)>,
     ) -> ProviderResult<Vec<(Address, Vec<StorageEntry>)>> {
+        if let Some(store) = reth_state_store::global() {
+            return addresses_with_keys
+                .into_iter()
+                .map(|(address, keys)| {
+                    let hashed_address = keccak256(address);
+                    let storage = keys
+                        .into_iter()
+                        .map(|key| {
+                            let value = store
+                                .storage(hashed_address, keccak256(key))
+                                .map_err(ProviderError::other)?;
+                            Ok(StorageEntry { key, value })
+                        })
+                        .collect::<ProviderResult<Vec<_>>>()?;
+                    Ok((address, storage))
+                })
+                .collect()
+        }
         if self.cached_storage_settings().use_hashed_state() {
             let mut hashed_storage = self.tx.cursor_dup_read::<tables::HashedStorages>()?;
 

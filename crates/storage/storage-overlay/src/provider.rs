@@ -515,6 +515,9 @@ where
     Provider::Target: DBProvider + StorageSettingsCache,
 {
     fn basic_account_from_db(&self, address: &Address) -> ProviderResult<Option<Account>> {
+        if let Some(store) = reth_state_store::global() {
+            return store.account(alloy_primitives::keccak256(address)).map_err(ProviderError::other)
+        }
         if self.provider().cached_storage_settings().use_hashed_state() {
             let hashed_address = alloy_primitives::keccak256(address);
             self.provider()
@@ -931,6 +934,19 @@ where
         storage_key: alloy_primitives::StorageKey,
         zero_if_missing: bool,
     ) -> ProviderResult<Option<alloy_primitives::StorageValue>> {
+        if let Some(store) = reth_state_store::global() {
+            let value = store
+                .storage(
+                    alloy_primitives::keccak256(address),
+                    alloy_primitives::keccak256(storage_key),
+                )
+                .map_err(ProviderError::other)?;
+            return Ok(if value.is_zero() {
+                zero_if_missing.then_some(U256::ZERO)
+            } else {
+                Some(value)
+            })
+        }
         if self.provider().cached_storage_settings().use_hashed_state() {
             let hashed_address = alloy_primitives::keccak256(address);
             let hashed_slot = alloy_primitives::keccak256(storage_key);

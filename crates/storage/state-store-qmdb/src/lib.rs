@@ -21,6 +21,7 @@ use {
 
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{BlockNumber, B256, U256};
+use checkpoints::{Checkpoint, Checkpoints};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -30,7 +31,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as LogConfig,
-    merkle::{full, mmb},
+    merkle::{full, mmb, Location},
     qmdb::current::{
         batch::MerkleizedBatch,
         ordered::variable::{
@@ -57,6 +58,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod checkpoints;
+
+/// Operations per log and Merkle journal blob.
+const ITEMS_PER_BLOB: NonZeroU64 = NonZeroU64::new(10_000_000).expect("non-zero");
+
 /// Bitmap chunk size in bytes (256 operations per chunk).
 const CHUNK: usize = 32;
 
@@ -80,15 +86,23 @@ pub struct QmdbConfig {
     pub page_cache_pages: NonZeroUsize,
     /// Threads used for merkleization.
     pub threads: NonZeroUsize,
+    /// Blocks of history kept in the log (the rewind and historical-proof window); older
+    /// inactive operations are pruned.
+    pub retain_blocks: u64,
+    /// Prune only once the prune point has advanced this many operations. Defaults to one log
+    /// blob: pruning frees whole blobs.
+    pub prune_step: u64,
 }
 
 impl QmdbConfig {
-    /// Defaults: 4 GiB page cache, 16 merkleization threads.
+    /// Defaults: 4 GiB page cache, 16 merkleization threads, 14 days of 200 ms blocks.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
             page_cache_pages: NonZeroUsize::new(1 << 20).expect("non-zero"),
             threads: NonZeroUsize::new(16).expect("non-zero"),
+            retain_blocks: 14 * 24 * 60 * 60 * 5,
+            prune_step: ITEMS_PER_BLOB.get(),
         }
     }
 }
@@ -99,6 +113,11 @@ struct Inner {
     /// Unpersisted batches by block number, kept alive for their descendants.
     live: Mutex<BTreeMap<BlockNumber, Vec<Batch>>>,
     tip: Mutex<Option<(BlockNumHash, B256)>>,
+    checkpoints: Mutex<Checkpoints>,
+    /// Location the database was last pruned to (logically; see `maybe_prune`).
+    pruned_to: Mutex<u64>,
+    retain_blocks: u64,
+    prune_step: u64,
 }
 
 impl Inner {
@@ -148,6 +167,9 @@ impl QmdbStateStore {
     pub fn open(config: QmdbConfig) -> Result<Self, StateStoreError> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let checkpoints = Checkpoints::open(&config.dir).map_err(backend)?;
+        let retain_blocks = config.retain_blocks;
+        let prune_step = config.prune_step;
         thread::Builder::new()
             .name("qmdb-runtime".into())
             .spawn(move || {
@@ -162,21 +184,81 @@ impl QmdbStateStore {
             .map_err(backend)?;
         let (runtime, db) = ready_rx.recv().map_err(backend)?.map_err(backend)?;
 
+        let pruned_to = *db.bounds().start;
         let inner = Inner {
             runtime,
             db: RwLock::new(Some(db)),
             live: Mutex::default(),
             tip: Mutex::default(),
+            checkpoints: Mutex::new(checkpoints),
+            pruned_to: Mutex::new(pruned_to),
+            retain_blocks,
+            prune_step,
         };
         let tip = inner.with_db(|db| {
             let metadata = inner.block_on(db.get_metadata()).map_err(backend)?;
             Ok(metadata.map(|bytes| (decode_metadata(&bytes), root_of(db.root()))))
         })?;
         *inner.tip.lock() = tip;
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(inner),
             _shutdown: Arc::new(ShutdownOnDrop(Mutex::new(Some(shutdown_tx)))),
-        })
+        };
+        // A database created before checkpoints existed starts its window at its tip.
+        let mut guard = store.inner.db.write();
+        if let Some((tip, _)) = tip &&
+            store.inner.checkpoints.lock().is_empty()
+        {
+            store.record_db_checkpoint(&guard, tip.number)?;
+        }
+        store.maybe_prune(&mut guard)?;
+        drop(guard);
+        Ok(store)
+    }
+
+    /// Records the database's current commit as `number`'s checkpoint.
+    fn record_db_checkpoint(
+        &self,
+        guard: &Option<QDb>,
+        number: u64,
+    ) -> Result<(), StateStoreError> {
+        let db = guard.as_ref().ok_or_else(poisoned)?;
+        let checkpoint =
+            Checkpoint { number, size: *db.bounds().end, sync_boundary: *db.sync_boundary() };
+        self.inner.checkpoints.lock().append(&[checkpoint]).map_err(backend)
+    }
+
+    /// Prunes inactive operations older than the retention window, in steps of whole blobs.
+    fn maybe_prune(&self, guard: &mut Option<QDb>) -> Result<(), StateStoreError> {
+        let Some((tip, _)) = *self.inner.tip.lock() else { return Ok(()) };
+        let Some(target) =
+            self.inner.checkpoints.lock().prune_target(tip.number, self.inner.retain_blocks)
+        else {
+            return Ok(())
+        };
+        let mut pruned_to = self.inner.pruned_to.lock();
+        if target.sync_boundary < *pruned_to + self.inner.prune_step {
+            return Ok(())
+        }
+        let start = Instant::now();
+        let db = guard.take().ok_or_else(poisoned)?;
+        let db =
+            self.inner.block_on(db.prune(Location::from(target.sync_boundary))).map_err(backend)?;
+        let pruned_ops = target.sync_boundary - *pruned_to;
+        // The log frees whole blobs, so its physical start can stay behind the logical prune point.
+        *pruned_to = target.sync_boundary;
+        *guard = Some(db);
+        self.inner.checkpoints.lock().drop_before(target.number).map_err(backend)?;
+        tracing::info!(
+            target: "state_store::qmdb",
+            tip = tip.number,
+            prune_block = target.number,
+            pruned_ops,
+            pruned_to = *pruned_to,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Pruned QMDB log"
+        );
+        Ok(())
     }
 
     /// Bulk-loads `chunks` of entries (from [`account_entry`] and [`storage_entry`]) into an empty
@@ -222,6 +304,8 @@ impl QmdbStateStore {
         let merkleized = self.inner.block_on(batch.merkleize(db)).map_err(backend)?;
         let root = self.apply_and_commit(&mut guard, merkleized)?;
         *self.inner.tip.lock() = Some((block, root));
+        self.record_db_checkpoint(&guard, block.number)?;
+        self.maybe_prune(&mut guard)?;
         Ok(root)
     }
 
@@ -375,12 +459,22 @@ impl StateStore for QmdbStateStore {
             expected = Some((pending.block, pending.root));
         }
 
-        let root = self.apply_and_commit(&mut self.inner.db.write(), last.batch.clone())?;
+        let mut guard = self.inner.db.write();
+        let root = self.apply_and_commit(&mut guard, last.batch.clone())?;
         debug_assert_eq!(root, last.root);
+        let checkpoints: Vec<_> = chain
+            .iter()
+            .map(|p| Checkpoint {
+                number: p.block.number,
+                size: *p.batch.bounds().tip.size,
+                sync_boundary: *p.batch.sync_boundary(),
+            })
+            .collect();
+        self.inner.checkpoints.lock().append(&checkpoints).map_err(backend)?;
 
         self.inner.live.lock().retain(|number, _| *number > last.block.number);
         *self.inner.tip.lock() = Some((last.block, last.root));
-        Ok(())
+        self.maybe_prune(&mut guard)
     }
 
     fn tip(&self) -> Result<Option<(BlockNumHash, B256)>, StateStoreError> {
@@ -396,7 +490,6 @@ impl StateStore for QmdbStateStore {
 }
 
 fn db_config(ctx: &Context, config: &QmdbConfig) -> QDbConfig {
-    const ITEMS_PER_BLOB: NonZeroU64 = NonZeroU64::new(10_000_000).expect("non-zero");
     const BUFFER: NonZeroUsize = NonZeroUsize::new(1 << 20).expect("non-zero");
     let page_cache = CacheRef::new(page_size(BLOB_PAGE_SIZE), config.page_cache_pages);
     DbConfig {

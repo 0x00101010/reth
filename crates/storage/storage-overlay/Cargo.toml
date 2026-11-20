@@ -23,6 +23,7 @@ reth-prune-types.workspace = true
 reth-stages-types.workspace = true
 reth-storage-api = { workspace = true, features = ["db-api"] }
 reth-storage-errors.workspace = true
+reth-state-store.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"], optional = true }
 reth-trie.workspace = true
 reth-trie-common.workspace = true

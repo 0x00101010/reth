@@ -200,3 +200,41 @@ fn import_is_deterministic_and_readable() {
     let b8 = b.stage(None, block(8), &HashedPostState::default()).unwrap().0;
     b.persist(vec![b8]).unwrap();
 }
+
+#[test]
+fn prunes_behind_retention_window_and_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let open_pruning = || {
+        let mut config = QmdbConfig::new(dir.path());
+        config.page_cache_pages = NonZeroUsize::new(1024).unwrap();
+        config.threads = NonZeroUsize::new(2).unwrap();
+        config.retain_blocks = 5;
+        config.prune_step = 1;
+        QmdbStateStore::open(config).unwrap()
+    };
+    let store = open_pruning();
+    let reference = MemoryStateStore::default();
+    let mut q_parent: Option<QmdbPending> = None;
+    let mut r_parent = None;
+    for (i, diff) in random_diffs(200, 3).iter().enumerate() {
+        let b = block(i as u64 + 1);
+        let (q, _) = store.stage(q_parent.as_ref(), b, diff).unwrap();
+        let (r, _) = reference.stage(r_parent.as_ref(), b, diff).unwrap();
+        store.persist(vec![q.clone()]).unwrap();
+        assert_same_reads(&store.reader(None).unwrap(), &reference.reader(Some(&r)).unwrap());
+        q_parent = Some(q);
+        r_parent = Some(r);
+    }
+    let pruned_to = *store.inner.pruned_to.lock();
+    assert!(pruned_to > 0, "nothing was pruned");
+    let tip = store.tip().unwrap();
+    drop(store);
+
+    let reopened = open_pruning();
+    assert_eq!(reopened.tip().unwrap(), tip);
+    assert_eq!(*reopened.inner.pruned_to.lock(), pruned_to);
+    assert_same_reads(
+        &reopened.reader(None).unwrap(),
+        &reference.reader(r_parent.as_ref()).unwrap(),
+    );
+}

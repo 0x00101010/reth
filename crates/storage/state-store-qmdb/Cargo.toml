@@ -30,6 +30,7 @@ commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = 
 
 # misc
 parking_lot.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 
 # qmdb-migrate
