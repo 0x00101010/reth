@@ -76,10 +76,15 @@ pub struct Command<C: ChainSpecParser> {
     #[arg(long)]
     access_stats: Option<PathBuf>,
 
-    /// Window for the cold-read analysis in `--access-stats`, in blocks (default: one day of
-    /// 200 ms blocks). Reads are evaluated only from `--from` plus one window.
-    #[arg(long, default_value_t = 432_000)]
-    access_window_blocks: u64,
+    /// Hot window for `--access-stats`, in seconds of block time: an access is cold if the key
+    /// was not accessed within this long before. Accesses are classified only from `--from` plus
+    /// one window.
+    #[arg(long, default_value_t = 86_400)]
+    access_window_secs: u64,
+
+    /// Sample keys 1 in `2^N` by key hash in `--access-stats` (per-block totals stay exact).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=7))]
+    access_sample_shift: u32,
 
     #[command(flatten)]
     pub jit: JitArgs,
@@ -144,6 +149,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         let access_stats = self.access_stats.clone();
         let record = access_stats.is_some();
         let blocks_per_chunk = if record { 1 } else { self.blocks_per_chunk };
+        let sample_mask = ((1u16 << self.access_sample_shift) - 1) as u8;
+        let (access_tx, mut access_rx) = mpsc::unbounded_channel();
         let (stats_tx, mut stats_rx) = mpsc::unbounded_channel();
         let (info_tx, mut info_rx) = mpsc::unbounded_channel();
         let cancellation = CancellationToken::new();
@@ -159,6 +166,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
             let consensus = components.consensus().clone();
             let stats_tx = stats_tx.clone();
             let info_tx = info_tx.clone();
+            let access_tx = access_tx.clone();
             let cancellation = cancellation.clone();
             let next_block = Arc::clone(&next_block);
             tasks.spawn_blocking(move || {
@@ -187,7 +195,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         ))
                     }
                 };
-                let mut accesses = access::Accesses::new(min_block);
+                let mut block_ts = 0;
 
                 loop {
                     if cancellation.is_cancelled() {
@@ -213,6 +221,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         let block = provider_factory
                             .recovered_block(block.into(), TransactionVariant::NoHash)?
                             .ok_or_else(|| eyre::eyre!("block {block} not found in the database"))?;
+                        block_ts = block.header().timestamp();
 
                         let result = match executor.execute_one(&block) {
                             Ok(result) => result,
@@ -308,9 +317,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         }
                         let _ = stats_tx.send((block.number(), block.gas_used()));
 
-                        // Reset DB once in a while to avoid OOM or read tx timeouts
-                        if executor.size_hint() > 5_000_000 ||
-                            executor_created.elapsed() > executor_lifetime
+                        // Reset DB once in a while to avoid OOM or read tx timeouts. Recording
+                        // runs one block per chunk, so the executor is dropped at chunk end.
+                        if !record &&
+                            (executor.size_hint() > 5_000_000 ||
+                                executor_created.elapsed() > executor_lifetime)
                         {
                             let last_block = block.number();
                             let old_executor = std::mem::replace(
@@ -319,7 +330,6 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                             );
                             let mut old_state = old_executor.into_state();
                             let bundle = old_state.take_bundle();
-                            accesses.absorb(&mut old_state.database, &bundle, last_block);
                             verify_bundle_against_changesets(
                                 &provider,
                                 &bundle,
@@ -332,7 +342,14 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     // Full verification at chunk end for remaining unverified blocks
                     let mut state = executor.into_state();
                     let bundle = state.take_bundle();
-                    accesses.absorb(&mut state.database, &bundle, chunk_end - 1);
+                    if record {
+                        let _ = access_tx.send(state.database.take_block(
+                            chunk_start,
+                            block_ts,
+                            &bundle,
+                            sample_mask,
+                        ));
+                    }
                     verify_bundle_against_changesets(
                         &provider,
                         &bundle,
@@ -340,7 +357,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     )?;
                 }
 
-                eyre::Ok(accesses)
+                eyre::Ok(())
             });
         }
 
@@ -353,7 +370,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         let mut last_logged_blocks = 0;
         let mut last_logged_time = Instant::now();
         let mut invalid_blocks = Vec::new();
-        let mut all_accesses = access::Accesses::new(min_block);
+        let mut hotness =
+            access::Hotness::new(min_block, self.access_window_secs, self.access_sample_shift);
 
         let mut interval = tokio::time::interval(Duration::from_secs(10));
 
@@ -369,10 +387,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     error!(?err, block=?block.num_hash(), "Invalid block");
                     invalid_blocks.push(block.num_hash());
                 }
+                Some(block) = access_rx.recv() => hotness.push(block),
                 result = tasks.join_next() => {
                     let Some(result) = result else { break };
                     match result {
-                        Ok(Ok(accesses)) => all_accesses.merge(accesses),
+                        Ok(Ok(())) => {}
                         Ok(Err(err)) => return Err(err.wrap_err("Re-execution failed")),
                         Err(err) => {
                             return Err(eyre::Report::new(err).wrap_err("Re-execution failed"))
@@ -389,6 +408,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                             throughput=?format_gas_throughput(gas_executed, last_logged_time.elapsed()),
                             progress=format!("{progress:.2}%"),
                             ?latest_executed_block,
+                            pending_access_blocks = hotness.pending(),
                             "Executed {blocks_executed} blocks"
                         );
                     }
@@ -398,6 +418,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     last_logged_time = Instant::now();
                 }
             }
+        }
+        drop(access_tx);
+        while let Some(block) = access_rx.recv().await {
+            hotness.push(block);
         }
 
         if invalid_blocks.is_empty() {
@@ -425,12 +449,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         if let Some(path) = access_stats {
             let provider =
                 provider_factory.database_provider_ro()?.disable_long_read_transaction_safety();
-            all_accesses.write_report(
-                provider.tx_ref(),
-                (min_block, max_block),
-                self.access_window_blocks,
-                &path,
-            )?;
+            hotness.write_report(provider.tx_ref(), (min_block, max_block - 1), &path)?;
             info!(path = %path.display(), "Wrote access report");
         }
 
