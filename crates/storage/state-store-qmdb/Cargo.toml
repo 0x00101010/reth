@@ -41,6 +41,10 @@ reth-db = { workspace = true, features = ["mdbx"], optional = true }
 reth-db-api = { workspace = true, optional = true }
 reth-libmdbx = { workspace = true, optional = true }
 reth-stages-types = { workspace = true, features = ["std"], optional = true }
+reth-provider = { workspace = true, optional = true }
+reth-ethereum-primitives = { workspace = true, optional = true }
+reth-static-file-types = { workspace = true, optional = true }
+reth-storage-api = { workspace = true, features = ["db-api"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -54,10 +58,18 @@ cli = [
     "dep:reth-db-api",
     "dep:reth-libmdbx",
     "dep:reth-stages-types",
+    "dep:reth-provider",
+    "dep:reth-ethereum-primitives",
+    "dep:reth-static-file-types",
+    "dep:reth-storage-api",
 ]
 # P=2 index partitions instead of P=3, for small-scale memory measurements only.
 index-p2 = []
 
 [[bin]]
 name = "qmdb-migrate"
+required-features = ["cli"]
+
+[[bin]]
+name = "qmdb-hotness"
 required-features = ["cli"]

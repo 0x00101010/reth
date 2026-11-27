@@ -12,11 +12,12 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-// Used only by the `qmdb-migrate` binary.
+// Used only by the `qmdb-migrate` and `qmdb-hotness` binaries.
 #[cfg(feature = "cli")]
 use {
-    clap as _, eyre as _, rayon as _, reth_db as _, reth_db_api as _, reth_libmdbx as _,
-    reth_stages_types as _,
+    clap as _, eyre as _, rayon as _, reth_db as _, reth_db_api as _,
+    reth_ethereum_primitives as _, reth_libmdbx as _, reth_provider as _, reth_stages_types as _,
+    reth_static_file_types as _, reth_storage_api as _,
 };
 
 use alloy_eips::BlockNumHash;
