@@ -1,5 +1,7 @@
 //! Re-execute blocks from database in parallel.
 
+mod access;
+
 use crate::common::{
     AccessRights, CliComponentsBuilder, CliNodeComponents, CliNodeTypes, Environment,
     EnvironmentArgs,
@@ -31,6 +33,7 @@ use reth_stages::stages::calculate_gas_used_from_headers;
 use reth_storage_api::{ChangeSetReader, DBProvider, StateProvider, StorageChangeSetReader};
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -67,6 +70,11 @@ pub struct Command<C: ChainSpecParser> {
     /// Continues with execution when an invalid block is encountered and collects these blocks.
     #[arg(long)]
     skip_invalid_blocks: bool,
+
+    /// Record every state read and write and write an access report (key hotness) to this
+    /// file. Uses a fresh executor per block so each block's reads reach the database.
+    #[arg(long)]
+    access_stats: Option<PathBuf>,
 
     #[command(flatten)]
     pub jit: JitArgs,
@@ -128,7 +136,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         )?;
 
         let skip_invalid_blocks = self.skip_invalid_blocks;
-        let blocks_per_chunk = self.blocks_per_chunk;
+        let access_stats = self.access_stats.clone();
+        let record = access_stats.is_some();
+        let blocks_per_chunk = if record { 1 } else { self.blocks_per_chunk };
         let (stats_tx, mut stats_rx) = mpsc::unbounded_channel();
         let (info_tx, mut info_rx) = mpsc::unbounded_channel();
         let cancellation = CancellationToken::new();
@@ -162,13 +172,17 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         let hash = provider.block_hash(block_number)?.ok_or_else(|| {
                             eyre::eyre!("hash for block {block_number} not found in the database")
                         })?;
-                        eyre::Ok(StateProviderDatabase(
-                            state_provider_factory
-                                .state_provider_from_database(provider, hash)
-                                .into_evm_state_provider(),
+                        eyre::Ok(access::RecordingDb::new(
+                            StateProviderDatabase(
+                                state_provider_factory
+                                    .state_provider_from_database(provider, hash)
+                                    .into_evm_state_provider(),
+                            ),
+                            record,
                         ))
                     }
                 };
+                let mut accesses = access::Accesses::default();
 
                 loop {
                     if cancellation.is_cancelled() {
@@ -298,7 +312,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                                 &mut executor,
                                 evm_config.batch_executor(db_at(last_block)?),
                             );
-                            let bundle = old_executor.into_state().take_bundle();
+                            let mut old_state = old_executor.into_state();
+                            let bundle = old_state.take_bundle();
+                            accesses.absorb(&mut old_state.database, &bundle);
                             verify_bundle_against_changesets(
                                 &provider,
                                 &bundle,
@@ -309,7 +325,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     }
 
                     // Full verification at chunk end for remaining unverified blocks
-                    let bundle = executor.into_state().take_bundle();
+                    let mut state = executor.into_state();
+                    let bundle = state.take_bundle();
+                    accesses.absorb(&mut state.database, &bundle);
                     verify_bundle_against_changesets(
                         &provider,
                         &bundle,
@@ -317,7 +335,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     )?;
                 }
 
-                eyre::Ok(())
+                eyre::Ok(accesses)
             });
         }
 
@@ -330,6 +348,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         let mut last_logged_blocks = 0;
         let mut last_logged_time = Instant::now();
         let mut invalid_blocks = Vec::new();
+        let mut all_accesses = access::Accesses::default();
 
         let mut interval = tokio::time::interval(Duration::from_secs(10));
 
@@ -348,7 +367,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 result = tasks.join_next() => {
                     let Some(result) = result else { break };
                     match result {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(accesses)) => all_accesses.merge(accesses),
                         Ok(Err(err)) => return Err(err.wrap_err("Re-execution failed")),
                         Err(err) => {
                             return Err(eyre::Report::new(err).wrap_err("Re-execution failed"))
@@ -396,6 +415,13 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 throughput=?format_gas_throughput(total_executed_gas, instant.elapsed()),
                 "Re-executed with invalid blocks"
             );
+        }
+
+        if let Some(path) = access_stats {
+            let provider =
+                provider_factory.database_provider_ro()?.disable_long_read_transaction_safety();
+            all_accesses.write_report(provider.tx_ref(), (min_block, max_block), &path)?;
+            info!(path = %path.display(), "Wrote access report");
         }
 
         Ok(())
