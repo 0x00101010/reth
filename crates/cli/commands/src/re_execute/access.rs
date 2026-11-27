@@ -120,11 +120,27 @@ pub(super) struct Accesses {
     reads_per_block: Vec<u32>,
     absent_reads: u64,
     total_reads: u64,
+    /// First block of the run; read events are stored as offsets from it.
+    base_block: u64,
+    /// Per key, the blocks that read it: offset from `base_block`, top bit set if the key
+    /// existed when read.
+    events: B256Map<Vec<u32>>,
 }
 
+const PRESENT_BIT: u32 = 1 << 31;
+
 impl Accesses {
-    /// Takes the reads recorded for one block, plus the keys the block wrote (from its bundle).
-    pub(super) fn absorb<DB>(&mut self, db: &mut RecordingDb<DB>, bundle: &BundleState) {
+    pub(super) fn new(base_block: u64) -> Self {
+        Self { base_block, ..Default::default() }
+    }
+
+    /// Takes the reads `block` recorded, plus the keys it wrote (from its bundle).
+    pub(super) fn absorb<DB>(
+        &mut self,
+        db: &mut RecordingDb<DB>,
+        bundle: &BundleState,
+        block: u64,
+    ) {
         if !db.record || (db.reads.is_empty() && bundle.state.is_empty()) {
             return;
         }
@@ -132,6 +148,11 @@ impl Accesses {
         for read in db.reads.drain(..) {
             self.total_reads += 1;
             self.absent_reads += !read.present as u64;
+            let offset = (block - self.base_block) as u32;
+            self.events
+                .entry(read.key)
+                .or_default()
+                .push(offset | if read.present { PRESENT_BIT } else { 0 });
             let stats = self.keys.entry(read.key).or_insert(KeyStats {
                 blocks: 0,
                 writes: 0,
@@ -192,6 +213,9 @@ impl Accesses {
         self.reads_per_block.extend(other.reads_per_block);
         self.absent_reads += other.absent_reads;
         self.total_reads += other.total_reads;
+        for (key, blocks) in other.events {
+            self.events.entry(key).or_default().extend(blocks);
+        }
     }
 
     /// Checks which accessed keys exist in `tx`'s current state and writes the report.
@@ -199,6 +223,7 @@ impl Accesses {
         mut self,
         tx: &impl DbTx,
         blocks: (u64, u64),
+        window: u64,
         path: &Path,
     ) -> eyre::Result<()> {
         let total_accounts = tx.entries::<HashedAccounts>()? as u64;
@@ -350,6 +375,62 @@ impl Accesses {
         writeln!(w, "address | hot slots | read-only slots | slot reads")?;
         for (address, slots, ro, reads) in top.into_iter().take(25) {
             writeln!(w, "{address} | {slots} | {ro} | {reads}")?;
+        }
+
+        // Cold reads under the window rule: a read is cold if the same key was not read in the
+        // previous `window` blocks. Only blocks at least one window after the run's start are
+        // evaluated, so every evaluated read has a full window of history behind it.
+        let eval_start = blocks.0 + window;
+        if eval_start < blocks.1 {
+            let n = (blocks.1 - eval_start) as usize;
+            let mut reads_eval = vec![0u32; n];
+            let mut cold_present = vec![0u32; n];
+            let mut cold_absent = vec![0u32; n];
+            let mut promoted_keys = 0u64;
+            for offsets in self.events.values_mut() {
+                offsets.sort_unstable_by_key(|o| o & !PRESENT_BIT);
+                let mut prev: Option<u64> = None;
+                let mut promoted = false;
+                for o in offsets.iter() {
+                    let b = self.base_block + (o & !PRESENT_BIT) as u64;
+                    if (eval_start..blocks.1).contains(&b) {
+                        let i = (b - eval_start) as usize;
+                        reads_eval[i] += 1;
+                        if prev.is_none_or(|p| b - p > window) {
+                            if o & PRESENT_BIT != 0 {
+                                cold_present[i] += 1;
+                                promoted = true;
+                            } else {
+                                cold_absent[i] += 1;
+                            }
+                        }
+                    }
+                    prev = Some(b);
+                }
+                promoted_keys += promoted as u64;
+            }
+            let sum = |v: &[u32]| v.iter().map(|x| *x as u64).sum::<u64>();
+            let quantiles = |mut v: Vec<u32>| {
+                v.sort_unstable();
+                let q = |p: f64| v[((v.len() - 1) as f64 * p) as usize];
+                format!("p50 {} p90 {} p99 {} max {}", q(0.5), q(0.9), q(0.99), q(1.0))
+            };
+            let (total, cp, ca) = (sum(&reads_eval), sum(&cold_present), sum(&cold_absent));
+            let per_block = |x: u64| x as f64 / n as f64;
+            writeln!(w, "\n## cold reads: key not read in the previous {window} blocks (blocks {eval_start}..{})", blocks.1)?;
+            writeln!(
+                w,
+                "reads evaluated: {total} over {n} blocks ({:.1} per block)",
+                per_block(total)
+            )?;
+            writeln!(w, "cold reads of existing keys (disk reads): {cp} = {:.2}% of reads, {:.2} per block, per-block {}",
+                pct(cp, total), per_block(cp), quantiles(cold_present.clone()))?;
+            writeln!(w, "cold reads of absent keys (answered by a negative filter): {ca} = {:.2}% of reads, {:.2} per block, per-block {}",
+                pct(ca, total), per_block(ca), quantiles(cold_absent.clone()))?;
+            let both: Vec<u32> =
+                cold_present.iter().zip(&cold_absent).map(|(a, b)| a + b).collect();
+            writeln!(w, "all cold reads per block: {}", quantiles(both))?;
+            writeln!(w, "distinct existing keys promoted cold -> hot: {promoted_keys}")?;
         }
 
         std::fs::write(path, out)?;

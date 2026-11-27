@@ -76,6 +76,11 @@ pub struct Command<C: ChainSpecParser> {
     #[arg(long)]
     access_stats: Option<PathBuf>,
 
+    /// Window for the cold-read analysis in `--access-stats`, in blocks (default: one day of
+    /// 200 ms blocks). Reads are evaluated only from `--from` plus one window.
+    #[arg(long, default_value_t = 432_000)]
+    access_window_blocks: u64,
+
     #[command(flatten)]
     pub jit: JitArgs,
 }
@@ -182,7 +187,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         ))
                     }
                 };
-                let mut accesses = access::Accesses::default();
+                let mut accesses = access::Accesses::new(min_block);
 
                 loop {
                     if cancellation.is_cancelled() {
@@ -314,7 +319,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                             );
                             let mut old_state = old_executor.into_state();
                             let bundle = old_state.take_bundle();
-                            accesses.absorb(&mut old_state.database, &bundle);
+                            accesses.absorb(&mut old_state.database, &bundle, last_block);
                             verify_bundle_against_changesets(
                                 &provider,
                                 &bundle,
@@ -327,7 +332,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     // Full verification at chunk end for remaining unverified blocks
                     let mut state = executor.into_state();
                     let bundle = state.take_bundle();
-                    accesses.absorb(&mut state.database, &bundle);
+                    accesses.absorb(&mut state.database, &bundle, chunk_end - 1);
                     verify_bundle_against_changesets(
                         &provider,
                         &bundle,
@@ -348,7 +353,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         let mut last_logged_blocks = 0;
         let mut last_logged_time = Instant::now();
         let mut invalid_blocks = Vec::new();
-        let mut all_accesses = access::Accesses::default();
+        let mut all_accesses = access::Accesses::new(min_block);
 
         let mut interval = tokio::time::interval(Duration::from_secs(10));
 
@@ -420,7 +425,12 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         if let Some(path) = access_stats {
             let provider =
                 provider_factory.database_provider_ro()?.disable_long_read_transaction_safety();
-            all_accesses.write_report(provider.tx_ref(), (min_block, max_block), &path)?;
+            all_accesses.write_report(
+                provider.tx_ref(),
+                (min_block, max_block),
+                self.access_window_blocks,
+                &path,
+            )?;
             info!(path = %path.display(), "Wrote access report");
         }
 
