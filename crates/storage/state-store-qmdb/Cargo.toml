@@ -73,3 +73,7 @@ required-features = ["cli"]
 [[bin]]
 name = "qmdb-hotness"
 required-features = ["cli"]
+
+[[bin]]
+name = "qmdb-xen"
+required-features = ["cli"]
