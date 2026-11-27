@@ -69,9 +69,12 @@ const CHUNK: usize = 32;
 /// Encoded store value: a 72-byte account or a 32-byte slot.
 pub type Value = Vec<u8>;
 /// Index partition prefix bytes: `2^(8*P)` partitions. P=3 (16.8M partitions) is the largest
-/// Commonware supports; partitions spill from sorted arrays to `BTreeMap`s past ~511 entries,
-/// i.e. ~8.5B keys in total at P=3.
+/// Commonware supports; partitions spill from sorted arrays to `BTreeMap`s past the index's
+/// spill threshold. The `index-p2` feature selects P=2 for small-scale memory measurements.
+#[cfg(not(feature = "index-p2"))]
 const PARTITION_BYTES: usize = 3;
+#[cfg(feature = "index-p2")]
+const PARTITION_BYTES: usize = 2;
 
 type QDb = Db<mmb::Family, Context, Digest, Value, Sha256, EightCap, PARTITION_BYTES, CHUNK, Rayon>;
 type Batch = Arc<MerkleizedBatch<mmb::Family, Digest, Update<Digest, Value>, CHUNK, Rayon>>;

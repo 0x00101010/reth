@@ -22,11 +22,11 @@ alloy-eips.workspace = true
 alloy-primitives.workspace = true
 
 # commonware, pinned by rev
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "9989e89e996cb0be88aad5c127c919726faa2d77" }
+commonware-codec = { git = "https://github.com/0x00101010/monorepo", rev = "cd26a47ba83f426ec9d0082d5d86c1629c2ac212" }
+commonware-cryptography = { git = "https://github.com/0x00101010/monorepo", rev = "cd26a47ba83f426ec9d0082d5d86c1629c2ac212" }
+commonware-parallel = { git = "https://github.com/0x00101010/monorepo", rev = "cd26a47ba83f426ec9d0082d5d86c1629c2ac212" }
+commonware-runtime = { git = "https://github.com/0x00101010/monorepo", rev = "cd26a47ba83f426ec9d0082d5d86c1629c2ac212" }
+commonware-storage = { git = "https://github.com/0x00101010/monorepo", rev = "cd26a47ba83f426ec9d0082d5d86c1629c2ac212" }
 
 # misc
 parking_lot.workspace = true
@@ -55,6 +55,8 @@ cli = [
     "dep:reth-libmdbx",
     "dep:reth-stages-types",
 ]
+# P=2 index partitions instead of P=3, for small-scale memory measurements only.
+index-p2 = []
 
 [[bin]]
 name = "qmdb-migrate"

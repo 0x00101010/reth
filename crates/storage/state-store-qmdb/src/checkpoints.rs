@@ -38,6 +38,7 @@ pub(crate) struct Checkpoints {
 
 impl Checkpoints {
     pub(crate) fn open(dir: &Path) -> io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
         let path = dir.join("checkpoints.bin");
         let mut bytes = Vec::new();
         if let Ok(mut file) = File::open(&path) {

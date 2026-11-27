@@ -172,12 +172,17 @@ fn main() -> eyre::Result<()> {
         })?;
     producer.join().map_err(|_| eyre::eyre!("producer panicked"))?;
 
-    let peak_rss = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM")).map(str::to_owned))
-        .unwrap_or_default();
+    // VmHWM includes the datadir's memory-mapped pages; RssAnon is heap.
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find(|l| l.starts_with(name))
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let memory = ["VmHWM", "RssAnon"].map(|name| field(name).unwrap_or_default()).join(" ");
     println!(
-        "done block={tip} root={root} entries={last_report} elapsed_s={:.0} {peak_rss}",
+        "done block={tip} root={root} entries={last_report} elapsed_s={:.0} {memory}",
         start.elapsed().as_secs_f64()
     );
     Ok(())
